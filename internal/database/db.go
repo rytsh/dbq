@@ -17,7 +17,7 @@ import (
 var (
 	ConnMaxLifetime = 15 * time.Minute
 	MaxIdleConns    = 3
-	MaxOpenConns    = 5
+	MaxOpenConns    = 3
 )
 
 func ConnectDB(ctx context.Context, dbType, dbSource string) (*sqlx.DB, error) {

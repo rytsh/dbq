@@ -58,7 +58,7 @@ func main() {
 
 func init() {
 	rootCmd.Flags().StringVar(&values.Source, "source", values.Source, "db data source")
-	rootCmd.Flags().StringVar(&values.Type, "type", values.Type, "db data source type, supported types: [pgx, ingresodbc, godror, sqlite3, sqlserver]")
+	rootCmd.Flags().StringVar(&values.Type, "type", values.Type, "db data source type, supported types: [pgx, odbc, godror, sqlite3, sqlserver]")
 	rootCmd.Flags().BoolVar(&values.Ping, "ping", values.Ping, "ping database and exit")
 	rootCmd.Flags().BoolVarP(&values.NoDelimeter, "no-delimeter", "n", values.NoDelimeter, "not include delimeter `;`")
 

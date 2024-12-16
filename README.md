@@ -22,7 +22,7 @@ Flags:
   -h, --help            help for query
       --ping            ping database and exit
       --source string   db data source
-      --type string     db data source type, supported types: [pgx, ingresodbc]
+      --type string     db data source type, supported types: [pgx, odbc, godror, sqlite3, sqlserver]
   -v, --version         version for query
 ```
 
