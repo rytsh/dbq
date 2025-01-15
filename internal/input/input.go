@@ -4,10 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/muesli/cancelreader"
-	"github.com/rs/zerolog/log"
 )
 
 type option struct {
@@ -65,7 +65,7 @@ func Input(ctx context.Context, fn func(ctx context.Context, input string) error
 		}
 
 		if err := fn(ctx, string(line)); err != nil {
-			log.Error().Err(err).Msg("input: error")
+			slog.Error("input: error", "error", err.Error())
 		}
 	}
 }

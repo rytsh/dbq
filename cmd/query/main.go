@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync"
+	"log/slog"
 
-	"github.com/rs/zerolog/log"
+	"github.com/rakunlabs/into"
+	"github.com/rakunlabs/logi"
 	"github.com/spf13/cobra"
-	"github.com/worldline-go/initializer"
-	"github.com/worldline-go/logz"
 
 	"github.com/rytsh/query/internal/database"
 	"github.com/rytsh/query/internal/input"
@@ -49,10 +48,12 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
-	initializer.Init(
+	into.Init(
 		runCommand,
-		initializer.WithInitLog(false),
-		initializer.WithOptionsLogz(logz.WithCaller(false)),
+		into.WithLogger(logi.InitializeLog(logi.WithCaller(false))),
+		into.WithMsgf("urlcrawl [%s]", version),
+		into.WithStartFn(nil),
+		into.WithStopFn(nil),
 	)
 }
 
@@ -65,7 +66,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&values.InputEcho, "echo", values.InputEcho, "echo test input")
 }
 
-func runCommand(ctx context.Context, _ *sync.WaitGroup) error {
+func runCommand(ctx context.Context) error {
 	rootCmd.Version = version
 	rootCmd.Long += "\nversion: " + version + " commit: " + commit + " buildDate:" + date
 
@@ -73,7 +74,7 @@ func runCommand(ctx context.Context, _ *sync.WaitGroup) error {
 }
 
 func run(ctx context.Context) error {
-	log.Info().Msgf("query [%s] commit: %s buildDate: %s", version, commit, date)
+	slog.Info(fmt.Sprintf("query [%s] commit: %s buildDate: %s", version, commit, date))
 
 	if values.InputEcho {
 		input.Input(ctx, func(ctx context.Context, input string) error {
@@ -91,7 +92,7 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 
-	log.Info().Msgf("connected to database")
+	slog.Info("connected to database")
 
 	if values.Ping {
 		return nil
