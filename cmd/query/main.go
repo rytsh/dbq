@@ -51,7 +51,7 @@ func main() {
 	into.Init(
 		runCommand,
 		into.WithLogger(logi.InitializeLog(logi.WithCaller(false))),
-		into.WithMsgf("urlcrawl [%s]", version),
+		into.WithMsgf("query [%s]", version),
 		into.WithStartFn(nil),
 		into.WithStopFn(nil),
 	)
