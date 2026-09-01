@@ -1,4 +1,4 @@
-BINARY_NAME := query
+BINARY_NAME := dbq
 BINARY_PATH := ./cmd/${BINARY_NAME}/main.go
 
 BUILD_DATE := $(shell date -u '+%Y-%m-%d_%H:%M:%S')

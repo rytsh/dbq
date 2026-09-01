@@ -4,7 +4,7 @@
 
 version: 2
 
-project_name: query
+project_name: dbq
 
 git:
   ignore_tags:
@@ -12,14 +12,14 @@ git:
 
 release:
   header: |
-    Get the latest release with brew or binary:
+    Get the latest release as a binary:
 
     ```sh
-    # curl -fSL https://github.com/rytsh/query/releases/latest/download/query_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ query
-    curl -fSL https://github.com/rytsh/query/releases/download/{{ .Tag }}/query_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ query
+    # curl -fSL https://github.com/rytsh/dbq/releases/latest/download/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
+    curl -fSL https://github.com/rytsh/dbq/releases/download/{{ .Tag }}/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
     ```
   footer: |
-    **Full Changelog**: https://github.com/rytsh/query/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/rytsh/dbq/compare/{{ .PreviousTag }}...{{ .Tag }}
 before:
   hooks:
     # You may remove this if you don't use go modules.
@@ -35,7 +35,7 @@ builds:
       - amd64
       # - arm
       # - arm64
-    main: ./cmd/query
+    main: ./cmd/dbq
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     flags:
@@ -50,11 +50,11 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 checksum:
   name_template: '{{ .ProjectName }}-{{ .Version }}-checksums.txt'
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 changelog:
   sort: asc
   use: github
@@ -84,31 +84,21 @@ changelog:
     - title: Other work
       order: 9999
 
-brews:
-- name: query
-  homepage: https://github.com/rytsh/query
-  description: "db query command line tool"
-  repository:
-    owner: brew-tools
-    name: homebrew-tap
-    token: "{{ .Env.BREW_TOKEN }}"
-  directory: Formula
-
 dockers:
 - image_templates:
-  - 'ghcr.io/rytsh/query:{{ .Tag }}'
-  - 'ghcr.io/rytsh/query:latest'
+  - 'ghcr.io/rytsh/dbq:{{ .Tag }}'
+  - 'ghcr.io/rytsh/dbq:latest'
   dockerfile: ci/Dockerfile
   build_flag_templates:
   - "--pull"
-  - "--label=io.artifacthub.package.readme-url=https://raw.githubusercontent.com/rytsh/query/main/README.md"
+  - "--label=io.artifacthub.package.readme-url=https://raw.githubusercontent.com/rytsh/dbq/main/README.md"
   - "--label=io.artifacthub.package.maintainers=[{\"name\":\"Eray Ates\",\"email\":\"eates23@gmail.com\"}]"
   - "--label=io.artifacthub.package.license=MIT"
-  - "--label=org.opencontainers.image.description=db query command line tool"
+  - "--label=org.opencontainers.image.description=db query cli, http api and mcp server"
   - "--label=org.opencontainers.image.created={{.Date}}"
   - "--label=org.opencontainers.image.name={{.ProjectName}}"
   - "--label=org.opencontainers.image.revision={{.FullCommit}}"
   - "--label=org.opencontainers.image.version={{.Version}}"
   - "--label=org.opencontainers.image.source={{.GitURL}}"
   - "--build-arg=DB_IMAGE=ghcr.io/rytsh/dock/db/multi:debian-12.6-slim"
-  - "--build-arg=GO_IMAGE=ghcr.io/rytsh/dock/build/go:1.23.0"
+  - "--build-arg=GO_IMAGE=ghcr.io/rytsh/dock/build/go:1.27.0"

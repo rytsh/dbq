@@ -3,7 +3,9 @@ package input
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -37,7 +39,7 @@ func Input(ctx context.Context, fn func(ctx context.Context, input string) error
 	if err != nil {
 		return fmt.Errorf("creating reader, err: %w", err)
 	}
-	defer cReader.Close()
+	defer func() { _ = cReader.Close() }()
 
 	go func() {
 		<-ctx.Done()
@@ -57,10 +59,24 @@ func Input(ctx context.Context, fn func(ctx context.Context, input string) error
 
 		line, err := reader.ReadBytes(';')
 		if err != nil {
+			// EOF is how a piped script or a Ctrl-D ends the session, and
+			// cancelreader reports a cancelled read as ErrCanceled. Neither is
+			// a failure.
+			if errors.Is(err, io.EOF) || errors.Is(err, cancelreader.ErrCanceled) {
+				fmt.Println()
+
+				return nil
+			}
+
 			return fmt.Errorf("reading input, err: %w", err)
 		}
 
-		if o.NoDelimeter {
+		// A trailing statement without the delimiter still has to run.
+		if len(line) == 0 {
+			continue
+		}
+
+		if o.NoDelimeter && line[len(line)-1] == ';' {
 			line = line[:len(line)-1]
 		}
 

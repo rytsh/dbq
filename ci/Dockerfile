@@ -9,6 +9,12 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 #     curl -fSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /etc/apt/trusted.gpg.d/pgdg.asc && \
 #     apt install postgresql-client-13 postgresql-client-14 postgresql-client-15 -y
 
-COPY query /usr/local/bin/query
+COPY dbq /usr/local/bin/dbq
 
-ENTRYPOINT ["/bin/bash"]
+EXPOSE 8080
+
+# An empty entrypoint with bash as the default command keeps the image usable as
+# a database client shell (`docker run <img>`) while still allowing the server to
+# be started directly (`docker run <img> dbq server`).
+ENTRYPOINT []
+CMD ["/bin/bash"]
