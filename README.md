@@ -1,11 +1,11 @@
 # dbq
 
-Run SQL against databases from the terminal, over HTTP, or from an AI agent.
+Run SQL against databases from the terminal or from an AI agent.
 
 `dbq` is three things over one core:
 
 - an interactive REPL that executes raw SQL and prints a table;
-- an HTTP server with a small REST API;
+- an HTTP server with health and liveness probes;
 - an **MCP server** so agents like Claude Code, Cursor or Windsurf can inspect
   schemas and query your databases.
 
@@ -49,7 +49,6 @@ environment with the `DBQ_` prefix, e.g. `DBQ_SERVER_PORT=9090`.
 
 ```yaml
 log_level: info
-default_connection: local
 
 connections:
   local:
@@ -150,30 +149,14 @@ Anything it cannot classify requires `full`. It fails closed.
 dbq server
 ```
 
-### REST API
+### HTTP probes
 
-| Method | Path                                              |
-| ------ | ------------------------------------------------- |
-| GET    | `/healthz` — pings every connection               |
-| GET    | `/livez`                                          |
-| GET    | `/api/v1/connections`                             |
-| GET    | `/api/v1/connections/{connection}/tables`         |
-| GET    | `/api/v1/connections/{connection}/tables/{table}` |
-| POST   | `/api/v1/connections/{connection}/query`          |
-| POST   | `/api/v1/query`                                   |
+| Method | Path                                |
+| ------ | ----------------------------------- |
+| GET    | `/healthz` — pings every connection |
+| GET    | `/livez`                            |
 
-```sh
-curl -s localhost:8080/api/v1/connections/prod/query \
-  -d '{"sql":"select count(*) from orders"}'
-```
-
-A statement rejected by the permission gate returns `403`, an unknown connection
-`404`. Error messages carry a stable machine-readable code and never echo the
-submitted SQL, which routinely contains data you would rather not have in logs:
-
-```json
-{"message":"[PERMISSION_DENIED] permission denied: this write statement on connection \"prod\" requires \"full\" access but \"safe-write\" is granted. DELETE without a WHERE clause affects every row in the table. Add a WHERE clause that selects specific rows, or ask the user to raise this connection's permission level"}
-```
+Database discovery and queries are exposed only through MCP.
 
 ## MCP server
 

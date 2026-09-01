@@ -125,10 +125,6 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	for _, info := range svc.Connections(opts.Scope) {
 		fmt.Fprintf(&b, "- %s (type: %s, permission: %s)", info.Name, info.Type, info.Permission)
 
-		if info.Default {
-			b.WriteString(" [default when connection is omitted]")
-		}
-
 		if info.Description != "" {
 			fmt.Fprintf(&b, " — %s", info.Description)
 		}
@@ -152,7 +148,7 @@ type listConnectionsOutput struct {
 }
 
 type listTablesInput struct {
-	Connection string `json:"connection,omitempty" jsonschema:"connection name from dbq_list_connections; omit to use the default connection"`
+	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	Schema     string `json:"schema,omitempty" jsonschema:"restrict the listing to a single schema; omit to list every non-system schema"`
 }
 
@@ -163,26 +159,26 @@ type listTablesOutput struct {
 }
 
 type describeTableInput struct {
-	Connection string `json:"connection,omitempty" jsonschema:"connection name from dbq_list_connections; omit to use the default connection"`
+	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	Table      string `json:"table" jsonschema:"table or view name; schema.table is also accepted"`
 	Schema     string `json:"schema,omitempty" jsonschema:"schema the table lives in; omit if the table argument is already qualified"`
 }
 
 type schemaContextInput struct {
-	Connection string   `json:"connection,omitempty" jsonschema:"connection name from dbq_list_connections; omit to use the default connection"`
+	Connection string   `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	Schema     string   `json:"schema,omitempty" jsonschema:"restrict the context to a single schema; omit for every non-system schema"`
 	Tables     []string `json:"tables,omitempty" jsonschema:"describe only these tables; omit to describe everything up to the server cap"`
 }
 
 type queryInput struct {
-	Connection string `json:"connection,omitempty" jsonschema:"connection name from dbq_list_connections; omit to use the default connection"`
+	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL        string `json:"sql" jsonschema:"exactly one read-only SQL statement (SELECT, SHOW, EXPLAIN, or WITH ... SELECT) in the connection's dialect; do not send several statements separated by semicolons"`
 	MaxRows    int    `json:"max_rows,omitempty" jsonschema:"rows to return; the server's own cap still applies and cannot be exceeded"`
 	MaxChars   int    `json:"max_chars,omitempty" jsonschema:"characters to keep per text value before it is shortened; raise only when you specifically need a long value, and narrow the query to that row and column first"`
 }
 
 type executeInput struct {
-	Connection string `json:"connection,omitempty" jsonschema:"connection name from dbq_list_connections; omit to use the default connection"`
+	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL        string `json:"sql" jsonschema:"exactly one data- or schema-modifying SQL statement; UPDATE and DELETE must carry a WHERE clause that selects specific rows"`
 }
 
@@ -242,7 +238,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 		}
 
 		return nil, listTablesOutput{
-			Connection: resolveName(svc, in.Connection),
+			Connection: in.Connection,
 			Tables:     tables,
 			Count:      len(tables),
 		}, nil
@@ -304,8 +300,8 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			"true, narrow the query with a WHERE clause or aggregate instead of paging blindly.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
 		res, err := svc.Execute(ctx, scope, service.ExecuteRequest{
-			Connection: in.Connection,
-			SQL:        in.SQL,
+			Connection:   in.Connection,
+			SQL:          in.SQL,
 			MaxRows:      in.MaxRows,
 			MaxCellChars: in.MaxChars,
 			ReadOnly:     true,
@@ -314,7 +310,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			return nil, queryOutput{}, err
 		}
 
-		return nil, toOutput(resolveName(svc, in.Connection), res), nil
+		return nil, toOutput(in.Connection, res), nil
 	})
 
 	// A tool that can never succeed is worse than an absent one: the model
@@ -348,7 +344,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			return nil, queryOutput{}, err
 		}
 
-		return nil, toOutput(resolveName(svc, in.Connection), res), nil
+		return nil, toOutput(in.Connection, res), nil
 	})
 }
 
@@ -375,24 +371,14 @@ func schemaText(ctx *service.SchemaContext) string {
 
 func toOutput(connection string, res *database.Result) queryOutput {
 	return queryOutput{
-		Connection:   connection,
-		Kind:         res.Kind,
-		Columns:      res.Columns,
-		Rows:         res.Rows,
-		RowCount:     res.RowCount,
+		Connection:     connection,
+		Kind:           res.Kind,
+		Columns:        res.Columns,
+		Rows:           res.Rows,
+		RowCount:       res.RowCount,
 		Truncated:      res.Truncated,
 		CellsTruncated: res.CellsTruncated,
 		RowsAffected:   res.RowsAffected,
 		DurationMS:     res.DurationMS,
 	}
-}
-
-// resolveName echoes back the connection actually used, so a client that
-// omitted the argument learns which default it hit.
-func resolveName(svc *service.Service, name string) string {
-	if name != "" {
-		return name
-	}
-
-	return svc.Manager().Default()
 }

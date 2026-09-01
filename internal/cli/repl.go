@@ -52,24 +52,34 @@ func runREPL(ctx context.Context, global *globalFlags, local *replFlags) error {
 	}
 	defer svc.Manager().Close() //nolint:errcheck // shutdown path
 
+	connection := global.Connection
+	if connection == "" {
+		names := svc.Manager().Names()
+		if len(names) != 1 {
+			return fmt.Errorf("--connection is required, available: %v", names)
+		}
+
+		connection = names[0]
+	}
+
 	// The REPL is the operator's own terminal, so the connection's configured
 	// permission is the only gate; no extra ceiling is applied.
 	scope := service.FullScope
 	scope.MaxRows = local.MaxRows
 
-	if err := svc.Ping(ctx, scope, global.Connection); err != nil {
+	if err := svc.Ping(ctx, scope, connection); err != nil {
 		return fmt.Errorf("connecting to database, err: %w", err)
 	}
 
 	if local.Ping {
-		slog.Info("connection ok", "connection", connectionLabel(svc, global.Connection))
+		slog.Info("connection ok", "connection", connection)
 
 		return nil
 	}
 
 	return input.Input(ctx, func(ctx context.Context, line string) error {
 		res, err := svc.Execute(ctx, scope, service.ExecuteRequest{
-			Connection: global.Connection,
+			Connection: connection,
 			SQL:        line,
 			MaxRows:    local.MaxRows,
 		})
@@ -79,12 +89,4 @@ func runREPL(ctx context.Context, global *globalFlags, local *replFlags) error {
 
 		return database.Print(os.Stdout, res)
 	}, input.NoDelimeter(local.NoDelimeter))
-}
-
-func connectionLabel(svc *service.Service, name string) string {
-	if name != "" {
-		return name
-	}
-
-	return svc.Manager().Default()
 }

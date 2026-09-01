@@ -23,15 +23,14 @@ type serverFlags struct {
 	MCPEndpoints []string
 }
 
-// newServerCommand runs dbq as an HTTP service exposing the REST API and the
-// MCP endpoint.
+// newServerCommand runs dbq as an HTTP service exposing probes and MCP.
 func newServerCommand(global *globalFlags, build BuildInfo) *cobra.Command {
 	local := &serverFlags{}
 
 	cmd := &cobra.Command{
 		Use:   "server",
 		Short: "run dbq as an HTTP and MCP server",
-		Long: "Serve the REST API and the Model Context Protocol endpoints over HTTP.\n\n" +
+		Long: "Serve health probes and Model Context Protocol endpoints over HTTP.\n\n" +
 			"One MCP endpoint is mounted per permission level, each on its own path\n" +
 			"(<mcp.path>/read-only, /safe-write, /full), so each can be given its own\n" +
 			"authentication upstream and switched off independently. Only read-only is\n" +

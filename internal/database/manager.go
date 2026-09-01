@@ -30,7 +30,6 @@ type ConnectionInfo struct {
 	Type        string     `json:"type"`
 	Description string     `json:"description,omitempty"`
 	Permission  Permission `json:"permission"`
-	Default     bool       `json:"default,omitempty"`
 }
 
 type connEntry struct {
@@ -46,16 +45,13 @@ type connEntry struct {
 // require every configured database to be reachable, and a database that is
 // down only fails the requests that target it.
 type Manager struct {
-	entries     map[string]*connEntry
-	names       []string
-	defaultName string
+	entries map[string]*connEntry
+	names   []string
 }
 
 // NewManager builds a Manager from connection definitions.
-//
-// defaultName may be empty; if there is exactly one connection it becomes the
-// default. No network I/O happens here.
-func NewManager(defs []ConnectionDef, defaultName string) (*Manager, error) {
+// No network I/O happens here.
+func NewManager(defs []ConnectionDef) (*Manager, error) {
 	if len(defs) == 0 {
 		return nil, errors.New("no connections configured")
 	}
@@ -92,19 +88,6 @@ func NewManager(defs []ConnectionDef, defaultName string) (*Manager, error) {
 
 	sort.Strings(m.names)
 
-	switch {
-	case defaultName == "" && len(defs) == 1:
-		m.defaultName = defs[0].Name
-	case defaultName == "":
-		// Leave unset: callers must name a connection explicitly.
-	default:
-		if _, ok := m.entries[defaultName]; !ok {
-			return nil, fmt.Errorf("default connection %q is not defined", defaultName)
-		}
-
-		m.defaultName = defaultName
-	}
-
 	return m, nil
 }
 
@@ -114,11 +97,6 @@ func (m *Manager) Names() []string {
 	copy(out, m.names)
 
 	return out
-}
-
-// Default returns the default connection name, or "" if there is none.
-func (m *Manager) Default() string {
-	return m.defaultName
 }
 
 // List returns the redacted view of every connection.
@@ -132,14 +110,13 @@ func (m *Manager) List() []ConnectionInfo {
 			Type:        def.Type,
 			Description: def.Description,
 			Permission:  def.Permission,
-			Default:     def.Name == m.defaultName,
 		})
 	}
 
 	return out
 }
 
-// Def returns the definition for name, resolving "" to the default connection.
+// Def returns the definition for name.
 func (m *Manager) Def(name string) (ConnectionDef, error) {
 	entry, err := m.entry(name)
 	if err != nil {
@@ -151,13 +128,7 @@ func (m *Manager) Def(name string) (ConnectionDef, error) {
 
 func (m *Manager) entry(name string) (*connEntry, error) {
 	if name == "" {
-		if m.defaultName == "" {
-			return nil, fmt.Errorf(
-				"no connection specified and no default configured, available: %v", m.names,
-			)
-		}
-
-		name = m.defaultName
+		return nil, fmt.Errorf("connection is required, available: %v", m.names)
 	}
 
 	entry, ok := m.entries[name]

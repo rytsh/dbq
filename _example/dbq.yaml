@@ -15,10 +15,6 @@
 
 log_level: info
 
-# Used when a request or command omits the connection name. Optional when there
-# is exactly one connection.
-default_connection: local
-
 connections:
   local:
     type: pgx
@@ -50,7 +46,7 @@ server:
   shutdown_timeout: 10s
 
 mcp:
-  # Set to false to serve only the REST API.
+  # Set to false to serve only the health and liveness probes.
   enabled: true
 
   # Base path the per-permission endpoints hang off.

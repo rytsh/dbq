@@ -1,54 +1,50 @@
-on:
-  push:
-    branches: 
-      - '**'
-    tags-ignore:
-      - docs
-
 name: Test
+
+on: [push]
+
 jobs:
   sonarcloud:
     runs-on: ubuntu-latest
     steps:
-    - name: get epository name
-      run: echo "REPOSITORY_NAME=${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
-    - uses: actions/checkout@v3
-      with:
-        # Disabling shallow clone is recommended for improving relevancy of reporting
-        fetch-depth: 0
-    - uses: actions/setup-go@v3
-      with:
-        go-version: '1.27' # The Go version to download (if necessary) and use.
-    # The odbc driver is cgo and needs the unixODBC headers to compile, so it is
-    # required even to build the test binaries.
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends unixodbc-dev
-    # - name: download golangci.yml
-    #   run: |
-    #     [[ ! -f ".golangci.yml" ]] && curl -kfsSL -O https://raw.githubusercontent.com/worldline-go/guide/main/lint/.golangci.yml || true
-    - name: golangci-lint
-      uses: golangci/golangci-lint-action@v3
-      with:
-        args: --timeout 5m --new-from-rev=HEAD~1 --issues-exit-code=0
-    - name: Run tests
-      run: |
-        GOPATH="$(dirname ${PWD})" golangci-lint run --out-format checkstyle ./... > golangci-lint-report.out || true
-        go test -coverprofile=coverage.out -json ./... > test-report.out
-    - name: SonarCloud Scan
-      uses: sonarsource/sonarcloud-github-action@master
-      with:
-        args: >
-          -Dsonar.organization=${{ github.repository_owner }}
-          -Dsonar.projectKey=${{ github.repository_owner }}_${{ env.REPOSITORY_NAME }}
-          -Dsonar.go.coverage.reportPaths=coverage.out
-          -Dsonar.go.tests.reportPaths=test-report.out
-          -Dsonar.go.golangci-lint.reportPaths=golangci-lint-report.out
-          -Dsonar.sources=.
-          -Dsonar.exclusions=**/vendor/**,**/*_test.go
-          -Dsonar.tests=.
-          -Dsonar.test.inclusions=**/*_test.go
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Get repository name
+        run: echo "REPOSITORY_NAME=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history improves SonarQube analysis and is needed by --new-from-rev.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=5m --new-from-rev=HEAD~1 --issues-exit-code=0
+
+      - name: Run tests
+        run: |
+          golangci-lint run --output.checkstyle.path=golangci-lint-report.out --issues-exit-code=0 ./...
+          go test -coverprofile=coverage.out -json ./... > test-report.out
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v8
+        with:
+          args: >
+            -Dsonar.organization=${{ github.repository_owner }}
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ env.REPOSITORY_NAME }}
+            -Dsonar.go.coverage.reportPaths=coverage.out
+            -Dsonar.go.tests.reportPaths=test-report.out
+            -Dsonar.go.golangci-lint.reportPaths=golangci-lint-report.out
+            -Dsonar.sources=.
+            -Dsonar.exclusions=**/vendor/**,**/*_test.go,_example/**
+            -Dsonar.tests=.
+            -Dsonar.test.inclusions=**/*_test.go
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

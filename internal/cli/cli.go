@@ -72,8 +72,8 @@ func NewRootCommand(build BuildInfo) *cobra.Command {
 
 // load reads the configuration and builds the service layer.
 //
-// An ad-hoc --source connection is merged into the loaded config and becomes
-// the default, so the rest of dbq only ever deals with named profiles.
+// An ad-hoc --source connection is merged into the loaded config as a named
+// profile selected by the REPL.
 func (f *globalFlags) load(ctx context.Context) (*config.Config, *service.Service, error) {
 	if f.ConfigFile != "" {
 		// chu reads CONFIG_FILE; the flag is a friendlier front door for it.
@@ -103,7 +103,7 @@ func (f *globalFlags) load(ctx context.Context) (*config.Config, *service.Servic
 		)
 	}
 
-	manager, err := database.NewManager(defs, cfg.DefaultConnection)
+	manager, err := database.NewManager(defs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -134,8 +134,7 @@ func (f *globalFlags) applyAdHoc(cfg *config.Config) error {
 		Description: "connection defined on the command line",
 		Permission:  f.Permission,
 	}
-
-	cfg.DefaultConnection = adHocName
+	f.Connection = adHocName
 
 	return nil
 }

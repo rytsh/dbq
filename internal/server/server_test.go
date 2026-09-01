@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +25,6 @@ func newTestServer(t *testing.T) *httptest.Server {
 	dsn := filepath.Join(t.TempDir(), "test.db")
 
 	cfg := &config.Config{
-		DefaultConnection: "ro",
 		Connections: map[string]config.Connection{
 			"ro": {Type: "sqlite3", Source: dsn, Permission: "read-only", Description: "read only"},
 			"rw": {Type: "sqlite3", Source: dsn, Permission: "full"},
@@ -49,7 +47,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("connection defs: %v", err)
 	}
 
-	manager, err := database.NewManager(defs, cfg.DefaultConnection)
+	manager, err := database.NewManager(defs)
 	if err != nil {
 		t.Fatalf("manager: %v", err)
 	}
@@ -117,73 +115,10 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestRESTQuery(t *testing.T) {
+func TestLivez(t *testing.T) {
 	ts := newTestServer(t)
 
-	resp, err := ts.Client().Post(
-		ts.URL+"/api/v1/connections/ro/query", "application/json",
-		strings.NewReader(`{"sql":"SELECT id, name FROM users ORDER BY id"}`),
-	)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-
-	var res database.Result
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if res.RowCount != 2 {
-		t.Fatalf("row_count = %d, want 2", res.RowCount)
-	}
-
-	if got := res.Rows[0][1]; got != "ada" {
-		t.Errorf("rows[0][1] = %v, want ada", got)
-	}
-}
-
-// TestRESTQueryPermissionDenied checks that the read-only connection rejects a
-// write even though the REST API itself applies no ceiling.
-func TestRESTQueryPermissionDenied(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := ts.Client().Post(
-		ts.URL+"/api/v1/connections/ro/query", "application/json",
-		strings.NewReader(`{"sql":"DELETE FROM users"}`),
-	)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
-	}
-}
-
-func TestRESTUnknownConnection(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := ts.Client().Get(ts.URL + "/api/v1/connections/nope/tables")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestRESTDescribeTable(t *testing.T) {
-	ts := newTestServer(t)
-
-	resp, err := ts.Client().Get(ts.URL + "/api/v1/connections/ro/tables/users")
+	resp, err := ts.Client().Get(ts.URL + "/livez")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -192,26 +127,37 @@ func TestRESTDescribeTable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
+}
 
-	var detail database.TableDetail
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode: %v", err)
+func TestRESTEndpointsNotMounted(t *testing.T) {
+	ts := newTestServer(t)
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/connections"},
+		{http.MethodGet, "/api/v1/connections/ro/tables"},
+		{http.MethodGet, "/api/v1/connections/ro/tables/users"},
+		{http.MethodPost, "/api/v1/connections/ro/query"},
+		{http.MethodPost, "/api/v1/query"},
 	}
 
-	if len(detail.Columns) != 3 {
-		t.Fatalf("columns = %d, want 3", len(detail.Columns))
-	}
+	for _, tt := range tests {
+		req, err := http.NewRequest(tt.method, ts.URL+tt.path, strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("request %s %s: %v", tt.method, tt.path, err)
+		}
 
-	if !detail.Columns[0].PrimaryKey {
-		t.Error("id should be reported as primary key")
-	}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("do %s %s: %v", tt.method, tt.path, err)
+		}
 
-	if detail.Columns[1].Nullable {
-		t.Error("name is NOT NULL, should not be nullable")
-	}
-
-	if !detail.Columns[2].Nullable {
-		t.Error("email should be nullable")
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s %s status = %d, want 404", tt.method, tt.path, resp.StatusCode)
+		}
 	}
 }
 
@@ -320,6 +266,19 @@ func TestMCPQuery(t *testing.T) {
 
 	if out.RowCount != 2 {
 		t.Fatalf("row_count = %d, want 2", out.RowCount)
+	}
+}
+
+func TestMCPQueryRequiresConnection(t *testing.T) {
+	ts := newTestServer(t)
+	session := connectMCP(t, ts, pathReadOnly)
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "dbq_query",
+		Arguments: map[string]any{"sql": "SELECT 1"},
+	})
+	if err == nil && !res.IsError {
+		t.Fatal("dbq_query must reject a request without a connection")
 	}
 }
 
@@ -564,25 +523,27 @@ func TestMCPSchemaContext(t *testing.T) {
 func assertRowCount(t *testing.T, ts *httptest.Server, want int) {
 	t.Helper()
 
-	resp, err := ts.Client().Post(
-		ts.URL+"/api/v1/connections/ro/query", "application/json",
-		strings.NewReader(`{"sql":"SELECT COUNT(*) FROM users"}`),
-	)
+	session := connectMCP(t, ts, pathReadOnly)
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "dbq_query",
+		Arguments: map[string]any{"connection": "ro", "sql": "SELECT COUNT(*) FROM users"},
+	})
 	if err != nil {
-		t.Fatalf("post: %v", err)
+		t.Fatalf("count query: %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	var res database.Result
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	var out struct {
+		Rows [][]any `json:"rows"`
+	}
+	if err := json.Unmarshal(mustJSON(t, res.StructuredContent), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if len(res.Rows) != 1 {
-		t.Fatalf("count query returned %d rows", len(res.Rows))
+	if len(out.Rows) != 1 {
+		t.Fatalf("count query returned %d rows", len(out.Rows))
 	}
 
-	if got := res.Rows[0][0]; got != float64(want) && got != int64(want) {
+	if got := out.Rows[0][0]; got != float64(want) && got != int64(want) {
 		t.Errorf("row count = %v (%T), want %d", got, got, want)
 	}
 }
@@ -609,5 +570,3 @@ func mustJSON(t *testing.T, v any) []byte {
 
 	return data
 }
-
-var _ = context.Background

@@ -12,11 +12,11 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/muesli/cancelreader v0.2.2
 	github.com/olekukonko/tablewriter v0.0.5
-	github.com/rakunlabs/ada v0.5.0
-	github.com/rakunlabs/ada/middleware/cors v0.5.0
-	github.com/rakunlabs/ada/middleware/log v0.5.0
-	github.com/rakunlabs/ada/middleware/recover v0.5.0
-	github.com/rakunlabs/ada/middleware/requestid v0.5.0
+	github.com/rakunlabs/ada v0.5.1
+	github.com/rakunlabs/ada/middleware/cors v0.5.1
+	github.com/rakunlabs/ada/middleware/log v0.5.1
+	github.com/rakunlabs/ada/middleware/recover v0.5.1
+	github.com/rakunlabs/ada/middleware/requestid v0.5.1
 	github.com/rakunlabs/chu v0.5.0
 	github.com/rakunlabs/into v0.5.3
 	github.com/rakunlabs/logi v0.4.5

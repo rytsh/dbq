@@ -30,10 +30,6 @@ var Version = "v0.0.0"
 type Config struct {
 	LogLevel string `cfg:"log_level" default:"info"`
 
-	// DefaultConnection names the connection used when a request omits one.
-	// It may be left empty if exactly one connection is configured.
-	DefaultConnection string `cfg:"default_connection"`
-
 	// Connections are the named connection profiles, keyed by name.
 	Connections map[string]Connection `cfg:"connections"`
 

@@ -1,5 +1,5 @@
-// Package service holds dbq's transport-agnostic business logic. Both the REST
-// API and the MCP server are thin adapters over this package.
+// Package service holds dbq's transport-agnostic business logic used by the CLI,
+// health probes and MCP server.
 package service
 
 import (
@@ -29,8 +29,8 @@ func (s *Service) Manager() *database.Manager {
 // Scope is a caller's view of the service: which connections it may see and how
 // much it may do with them.
 //
-// It exists so a single Service can serve both a trusted REST caller and an
-// untrusted MCP client without duplicating the data access code.
+// It lets each caller apply its own connection visibility and permission limits
+// without duplicating the data access code.
 type Scope struct {
 	// Cap is the ceiling applied on top of a connection's own permission. The
 	// effective permission is the lower of the two. Empty means no extra cap.
@@ -336,7 +336,7 @@ func compactSchema(tables []database.TableDetail) string {
 
 // ExecuteRequest is a single SQL statement to run.
 type ExecuteRequest struct {
-	// Connection is the profile name. Empty uses the default connection.
+	// Connection is the required profile name.
 	Connection string
 	// SQL is the statement. Exactly one statement is expected.
 	SQL string
