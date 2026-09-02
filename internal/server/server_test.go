@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -20,6 +21,10 @@ import (
 // newTestServer spins up dbq over two SQLite connections: "ro" is read-only and
 // "rw" has full access, so both sides of the permission gate are exercised.
 func newTestServer(t *testing.T) *httptest.Server {
+	return newTestServerWithExport(t, true)
+}
+
+func newTestServerWithExport(t *testing.T, exportEnabled bool) *httptest.Server {
 	t.Helper()
 
 	dsn := filepath.Join(t.TempDir(), "test.db")
@@ -31,11 +36,13 @@ func newTestServer(t *testing.T) *httptest.Server {
 		},
 		Server: config.Server{Port: "0", ShutdownTimeout: time.Second},
 		MCP: config.MCP{
-			Enabled:   true,
-			MaxRows:   10,
-			Stateless: true,
+			Enabled:        true,
+			ExportEnabled:  exportEnabled,
+			MaxRows:        10,
+			Stateless:      true,
+			AllowedOrigins: []string{"https://client.example"},
 			Endpoints: []config.Endpoint{
-				{Path: "/mcp", Permission: "read-only"},
+				{Path: "/mcp", Permission: "read-only", Export: exportEnabled},
 				{Path: "/mcp/write", Permission: "safe-write"},
 			},
 		},
@@ -76,6 +83,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("server: %v", err)
 	}
+	t.Cleanup(func() { _ = srv.Close() })
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -202,7 +210,7 @@ func TestMCPListTools(t *testing.T) {
 
 	want := []string{
 		"dbq_list_connections", "dbq_list_tables", "dbq_describe_table",
-		"dbq_schema_context", "dbq_query",
+		"dbq_schema_context", "dbq_query", "dbq_export",
 	}
 
 	for _, name := range want {
@@ -215,6 +223,146 @@ func TestMCPListTools(t *testing.T) {
 	// it and burn turns on a refusal.
 	if got["dbq_execute"] {
 		t.Error("read-only endpoint must not advertise dbq_execute")
+	}
+}
+
+func TestMCPExportIsOptIn(t *testing.T) {
+	ts := newTestServerWithExport(t, false)
+	session := connectMCP(t, ts, pathReadOnly)
+
+	res, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name == "dbq_export" {
+			t.Fatal("dbq_export advertised without export_enabled")
+		}
+	}
+
+	resp, err := ts.Client().Get(ts.URL + "/exports/not-found/file.sql")
+	if err != nil {
+		t.Fatalf("get export route: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("export route status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestMCPExportInputSchemaHasConstraints(t *testing.T) {
+	ts := newTestServer(t)
+	session := connectMCP(t, ts, pathReadOnly)
+
+	res, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	for _, tool := range res.Tools {
+		if tool.Name != "dbq_export" {
+			continue
+		}
+
+		schema := mustJSON(t, tool.InputSchema)
+		if !strings.Contains(string(schema), `"maximum":1000`) ||
+			!strings.Contains(string(schema), `"enum":["postgresql","sqlite3","sqlserver","oracle","mysql","ingres","odbc"]`) {
+			t.Fatalf("export schema lacks constraints: %s", schema)
+		}
+
+		return
+	}
+
+	t.Fatal("dbq_export not advertised")
+}
+
+func TestMCPRejectsCrossOriginRequests(t *testing.T) {
+	ts := newTestServer(t)
+	req, err := http.NewRequest(http.MethodPost, ts.URL+pathReadOnly, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Origin", "https://evil.example")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestMCPAllowsConfiguredOriginPreflight(t *testing.T) {
+	ts := newTestServer(t)
+	req, err := http.NewRequest(http.MethodOptions, ts.URL+pathReadOnly, nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Origin", "https://client.example")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type,mcp-protocol-version")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://client.example" {
+		t.Errorf("allow origin = %q", got)
+	}
+	if got := strings.ToLower(resp.Header.Get("Access-Control-Allow-Headers")); !strings.Contains(got, "content-type") {
+		t.Errorf("allow headers = %q", got)
+	}
+}
+
+func TestMCPExportReturnsManifestAndDownload(t *testing.T) {
+	ts := newTestServer(t)
+	session := connectMCP(t, ts, pathReadOnly)
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "dbq_export",
+		Arguments: map[string]any{
+			"connection": "ro", "sql": "SELECT id, name FROM users ORDER BY id",
+			"target_table": "imported_users", "batch_size": 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("call tool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("tool error: %s", contentText(res))
+	}
+
+	var out struct {
+		DownloadURL string `json:"download_url"`
+		RowCount    int    `json:"row_count"`
+	}
+	if err := json.Unmarshal(mustJSON(t, res.StructuredContent), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.RowCount != 2 || !strings.HasPrefix(out.DownloadURL, "/exports/") {
+		t.Fatalf("manifest = %+v", out)
+	}
+	if text := contentText(res); strings.Contains(text, "Ada") || strings.Contains(text, "Grace") {
+		t.Fatalf("MCP result leaked exported values: %s", text)
+	}
+
+	resp, err := ts.Client().Get(ts.URL + out.DownloadURL)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "INSERT INTO \"imported_users\"") || !strings.Contains(got, "'ada'") {
+		t.Errorf("download = %q", got)
 	}
 }
 
@@ -515,6 +663,11 @@ func TestMCPSchemaContext(t *testing.T) {
 		if !strings.Contains(text, w) {
 			t.Errorf("schema context missing %q\n---\n%s", w, text)
 		}
+	}
+
+	structured := mustJSON(t, res.StructuredContent)
+	if strings.Contains(string(structured), `"tables"`) {
+		t.Errorf("schema structured content duplicates full table details: %s", structured)
 	}
 }
 

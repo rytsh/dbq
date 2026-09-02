@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,39 @@ func TestConnectionDefsSkipsDisabled(t *testing.T) {
 	}
 	if defs[0].Name != "enabled" || defs[0].CatalogType() != "ingres" {
 		t.Errorf("definition = %+v, want enabled Ingres connection", defs[0])
+	}
+}
+
+func TestMCPValidateExport(t *testing.T) {
+	tests := []MCP{
+		{Enabled: true, ExportEnabled: true, MaxExportRows: -1},
+		{Enabled: true, ExportEnabled: true, MaxExportBytes: 20, MaxTotalExportBytes: 10},
+		{Enabled: true, ExportEnabled: true, PublicBaseURL: "http://example.com"},
+		{Enabled: true, AllowedOrigins: []string{"https://example.com/path"}},
+	}
+
+	for _, cfg := range tests {
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate(%+v) succeeded, want error", cfg)
+		}
+	}
+
+	valid := MCP{
+		Enabled: true, ExportEnabled: true, PublicBaseURL: "https://dbq.example.com/base/",
+		AllowedOrigins: []string{"https://client.example.com"},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	if strings.TrimRight(valid.PublicBaseURL, "/") == "" {
+		t.Fatal("test setup has empty public URL")
+	}
+}
+
+func TestMCPValidateIgnoresDisabledSettings(t *testing.T) {
+	cfg := MCP{Enabled: false, ExportEnabled: true, MaxExportRows: -1, PublicBaseURL: "://bad"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled MCP validation: %v", err)
 	}
 }
 

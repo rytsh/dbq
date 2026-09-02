@@ -6,6 +6,7 @@ require (
 	github.com/alexbrainman/odbc v0.0.0-20241104074637-25af894ea08b
 	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/godror/godror v0.46.0
+	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/mattn/go-sqlite3 v1.14.24
@@ -13,7 +14,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/rakunlabs/ada v0.5.1
-	github.com/rakunlabs/ada/middleware/cors v0.5.1
 	github.com/rakunlabs/ada/middleware/log v0.5.1
 	github.com/rakunlabs/ada/middleware/recover v0.5.1
 	github.com/rakunlabs/ada/middleware/requestid v0.5.1
@@ -32,7 +32,6 @@ require (
 	github.com/godror/knownpb v0.1.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20190719163853-cb61b32ac6fe // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/hashicorp/go-envparse v0.1.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

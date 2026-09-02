@@ -6,14 +6,19 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/rytsh/dbq/internal/artifact"
 	"github.com/rytsh/dbq/internal/database"
 	"github.com/rytsh/dbq/internal/service"
 )
@@ -38,6 +43,14 @@ type Options struct {
 	SessionTimeout time.Duration
 	// Logger receives MCP protocol logs. Nil disables them.
 	Logger *slog.Logger
+	// Exports stores generated SQL outside the model context. Nil disables export.
+	Exports *artifact.Store
+	// ExportBaseURL is prepended to artifact download paths. Empty keeps them relative.
+	ExportBaseURL string
+	// MaxExportRows caps rows written to one artifact.
+	MaxExportRows int
+	// AllowedOrigins permits exact cross-origin browser clients.
+	AllowedOrigins []string
 }
 
 type minLevelHandler struct {
@@ -82,15 +95,55 @@ func New(svc *service.Service, opts Options) *mcp.Server {
 // per-client state, and the SDK explicitly supports getServer returning the
 // same server multiple times.
 func Handler(server *mcp.Server, opts Options) http.Handler {
-	return mcp.NewStreamableHTTPHandler(
+	var handler http.Handler = mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{
-			Stateless:      opts.Stateless,
-			JSONResponse:   opts.JSONResponse,
-			SessionTimeout: opts.SessionTimeout,
-			Logger:         opts.Logger,
+			Stateless:                    opts.Stateless,
+			JSONResponse:                 opts.JSONResponse,
+			SessionTimeout:               opts.SessionTimeout,
+			Logger:                       opts.Logger,
+			PropagateRequestCancellation: true,
 		},
 	)
+
+	protection := http.NewCrossOriginProtection()
+	for _, origin := range opts.AllowedOrigins {
+		_ = protection.AddTrustedOrigin(origin)
+	}
+	if len(opts.AllowedOrigins) > 0 {
+		handler = withCORS(handler, opts.AllowedOrigins)
+	}
+
+	return protection.Handler(handler)
+}
+
+func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	for _, origin := range allowedOrigins {
+		allowed[origin] = struct{}{}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if _, ok := allowed[origin]; !ok {
+			next.ServeHTTP(w, r)
+
+			return
+		}
+
+		w.Header().Add("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id")
+			w.WriteHeader(http.StatusNoContent)
+
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // buildInstructions is the system-level prompt the client shows the model. It
@@ -114,6 +167,9 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	b.WriteString("2. Call " + ToolPrefix + "schema_context for a compact overview of a database, ")
 	b.WriteString("or " + ToolPrefix + "list_tables plus " + ToolPrefix + "describe_table when you only need a few tables.\n")
 	b.WriteString("3. Write SQL against the real column names you just read, then run it with " + ToolPrefix + "query.\n\n")
+	if opts.Exports != nil {
+		b.WriteString("4. When the user wants data saved or moved, use " + ToolPrefix + "export; it creates a downloadable SQL artifact without putting row data in model context.\n\n")
+	}
 
 	b.WriteString("Rules:\n")
 	b.WriteString("- Never invent table or column names. Inspect the schema first.\n")
@@ -193,6 +249,15 @@ type schemaContextInput struct {
 	Tables     []string `json:"tables,omitempty" jsonschema:"describe only these tables; omit to describe everything up to the server cap"`
 }
 
+type schemaContextOutput struct {
+	Connection string `json:"connection"`
+	Schema     string `json:"schema,omitempty"`
+	TableCount int    `json:"table_count"`
+	Described  int    `json:"tables_described"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	Compact    string `json:"compact"`
+}
+
 type queryInput struct {
 	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL        string `json:"sql" jsonschema:"exactly one read-only SQL statement (SELECT, SHOW, EXPLAIN, or WITH ... SELECT) in the connection's dialect; do not send several statements separated by semicolons"`
@@ -203,6 +268,26 @@ type queryInput struct {
 type executeInput struct {
 	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL        string `json:"sql" jsonschema:"exactly one data- or schema-modifying SQL statement; UPDATE and DELETE must carry a WHERE clause that selects specific rows"`
+}
+
+type exportInput struct {
+	Connection    string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
+	SQL           string `json:"sql" jsonschema:"exactly one read-only SELECT whose visible result columns and rows will be exported"`
+	TargetTable   string `json:"target_table" jsonschema:"table name to use in the generated INSERT statements; schema.table is accepted"`
+	TargetDialect string `json:"target_dialect,omitempty" jsonschema:"dialect for generated SQL (postgresql, sqlite3, sqlserver, oracle, mysql); omit to use the source connection dialect"`
+	BatchSize     int    `json:"batch_size,omitempty" jsonschema:"rows per INSERT statement; default 100"`
+	Filename      string `json:"filename,omitempty" jsonschema:"download filename without a directory; .sql is added when omitted"`
+}
+
+type exportOutput struct {
+	ExportID    string    `json:"export_id"`
+	Filename    string    `json:"filename"`
+	DownloadURL string    `json:"download_url"`
+	Rows        int       `json:"row_count"`
+	Statements  int       `json:"statement_count"`
+	SizeBytes   int64     `json:"size_bytes"`
+	SHA256      string    `json:"sha256"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 type queryOutput struct {
@@ -226,6 +311,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 	// Pointer-valued hints have to be addressable; these are the shared values.
 	closedWorld := false
 	destructive := true
+	nonDestructive := false
 
 	readOnlyAnnotations := func(title string) *mcp.ToolAnnotations {
 		return &mcp.ToolAnnotations{
@@ -291,7 +377,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			"with its columns, types and primary keys, rendered one line per table. This is the " +
 			"cheapest way to learn a schema before writing SQL. Large schemas are truncated, so pass " +
 			"the tables argument when you already know which tables you care about.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in schemaContextInput) (*mcp.CallToolResult, *service.SchemaContext, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in schemaContextInput) (*mcp.CallToolResult, schemaContextOutput, error) {
 		out, err := svc.SchemaContext(ctx, scope, service.SchemaContextRequest{
 			Connection: in.Connection,
 			Schema:     in.Schema,
@@ -299,14 +385,22 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			MaxTables:  opts.MaxSchemaTables,
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, schemaContextOutput{}, err
+		}
+		result := schemaContextOutput{
+			Connection: out.Connection,
+			Schema:     out.Schema,
+			TableCount: out.TableCount,
+			Described:  len(out.Tables),
+			Truncated:  out.Truncated,
+			Compact:    out.Compact,
 		}
 
 		// The compact rendering is what the model should read; hand it over as
 		// the text content instead of letting the SDK dump the full JSON.
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: schemaText(out)}},
-		}, out, nil
+		}, result, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -319,7 +413,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 		},
 		Description: "Run one read-only SQL statement (SELECT, SHOW, EXPLAIN, WITH ... SELECT) and " +
 			"return the rows. Writes and DDL are always refused here regardless of the connection's " +
-			"permission, so this tool is safe to call freely. Results are capped: if truncated is " +
+			"permission. Database-role privileges remain the final security boundary because read-classified functions may still have side effects. Results are capped: if truncated is " +
 			"true, narrow the query with a WHERE clause or aggregate instead of paging blindly.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
 		res, err := svc.Execute(ctx, scope, service.ExecuteRequest{
@@ -332,9 +426,85 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 		if err != nil {
 			return nil, queryOutput{}, err
 		}
+		slog.InfoContext(ctx, "mcp query completed",
+			"connection", in.Connection,
+			"kind", res.Kind,
+			"rows", res.RowCount,
+			"truncated", res.Truncated,
+			"duration_ms", res.DurationMS,
+		)
 
 		return nil, toOutput(in.Connection, res), nil
 	})
+
+	if opts.Exports != nil {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:  ToolPrefix + "export",
+			Title: "Export query as INSERT SQL",
+			Annotations: &mcp.ToolAnnotations{
+				Title:           "Export query as INSERT SQL",
+				DestructiveHint: &nonDestructive,
+				OpenWorldHint:   &closedWorld,
+			},
+			Description: "Run one read-only SELECT and stream every returned row into a short-lived downloadable .sql file containing batched INSERT statements. " +
+				"The exported data is never returned in the MCP response or placed in model context; only a small manifest and download URL are returned. " +
+				"Use this instead of dbq_query when the user wants to move or save data. The query must explicitly select the desired columns and rows.",
+			InputSchema: exportInputSchema(),
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, in exportInput) (*mcp.CallToolResult, exportOutput, error) {
+			filename := in.Filename
+			if filename == "" {
+				filename = strings.ReplaceAll(in.TargetTable, ".", "-") + ".sql"
+			}
+
+			maxRows := opts.MaxExportRows
+			if maxRows <= 0 {
+				maxRows = database.DefaultMaxExportRows
+			}
+
+			var exported *database.ExportResult
+			metadata, err := opts.Exports.Create(ctx, filename, func(w io.Writer) error {
+				var exportErr error
+				exported, exportErr = svc.ExportInserts(ctx, scope, service.ExportRequest{
+					Connection:    in.Connection,
+					SQL:           in.SQL,
+					TargetTable:   in.TargetTable,
+					TargetDialect: in.TargetDialect,
+					BatchSize:     in.BatchSize,
+					MaxRows:       maxRows,
+				}, w)
+
+				return exportErr
+			})
+			if err != nil {
+				return nil, exportOutput{}, err
+			}
+			slog.InfoContext(ctx, "mcp export completed",
+				"connection", in.Connection,
+				"rows", exported.Rows,
+				"statements", exported.Statements,
+				"size_bytes", metadata.Size,
+			)
+
+			downloadURL := opts.ExportBaseURL + "/exports/" + metadata.ID + "/" + url.PathEscape(metadata.Filename)
+			out := exportOutput{
+				ExportID:    metadata.ID,
+				Filename:    metadata.Filename,
+				DownloadURL: downloadURL,
+				Rows:        exported.Rows,
+				Statements:  exported.Statements,
+				SizeBytes:   metadata.Size,
+				SHA256:      metadata.SHA256,
+				ExpiresAt:   metadata.ExpiresAt,
+			}
+
+			content := []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+				"Export ready: %d rows, %d bytes. Download: %s (expires %s). The file contents were not sent to the model.",
+				out.Rows, out.SizeBytes, out.DownloadURL, out.ExpiresAt.Format(time.RFC3339),
+			)}}
+
+			return &mcp.CallToolResult{Content: content}, out, nil
+		})
+	}
 
 	// A tool that can never succeed is worse than an absent one: the model
 	// sees it, tries it, is refused, and burns turns rediscovering the policy.
@@ -368,9 +538,40 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 		if err != nil {
 			return nil, queryOutput{}, err
 		}
+		var rowsAffected any
+		if res.RowsAffected != nil {
+			rowsAffected = *res.RowsAffected
+		}
+		slog.InfoContext(ctx, "mcp execute completed",
+			"connection", in.Connection,
+			"kind", res.Kind,
+			"rows_affected", rowsAffected,
+			"duration_ms", res.DurationMS,
+		)
 
 		return nil, toOutput(in.Connection, res), nil
 	})
+}
+
+func exportInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[exportInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("building export input schema: %v", err))
+	}
+
+	minLength := 1
+	schema.Properties["sql"].MinLength = &minLength
+	schema.Properties["target_table"].MinLength = &minLength
+	schema.Properties["target_dialect"].Enum = []any{
+		"postgresql", "sqlite3", "sqlserver", "oracle", "mysql", "ingres", "odbc",
+	}
+	minimum := float64(1)
+	maximum := float64(database.MaxExportBatchSize)
+	schema.Properties["batch_size"].Minimum = &minimum
+	schema.Properties["batch_size"].Maximum = &maximum
+	schema.Properties["batch_size"].Default = json.RawMessage("100")
+
+	return schema
 }
 
 func schemaText(ctx *service.SchemaContext) string {

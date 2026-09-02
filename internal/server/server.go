@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/rakunlabs/ada"
-	mcors "github.com/rakunlabs/ada/middleware/cors"
 	mlog "github.com/rakunlabs/ada/middleware/log"
 	mrecover "github.com/rakunlabs/ada/middleware/recover"
 	mrequestid "github.com/rakunlabs/ada/middleware/requestid"
 
+	"github.com/rytsh/dbq/internal/artifact"
 	"github.com/rytsh/dbq/internal/config"
 	"github.com/rytsh/dbq/internal/mcpserver"
 	"github.com/rytsh/dbq/internal/service"
@@ -25,18 +26,24 @@ type Server struct {
 	svc     *service.Service
 	cfg     *config.Config
 	address string
+	exports *artifact.Store
 }
 
 // New builds the HTTP server, mounting health probes and, when enabled, the MCP
 // streamable HTTP endpoints.
 func New(cfg *config.Config, svc *service.Service, version string) (*Server, error) {
+	if err := cfg.MCP.Validate(); err != nil {
+		return nil, err
+	}
+
 	app := ada.New(ada.WithShutdownTimeout(cfg.Server.ShutdownTimeout))
 
 	app.Use(
 		mrecover.Middleware(),
 		mrequestid.Middleware(),
-		mlog.Middleware(),
-		mcors.Middleware(),
+		mlog.Middleware(mlog.WithSkipper(func(r *http.Request) bool {
+			return strings.HasPrefix(r.URL.Path, "/exports/")
+		})),
 	)
 
 	s := &Server{
@@ -48,8 +55,24 @@ func New(cfg *config.Config, svc *service.Service, version string) (*Server, err
 
 	app.GET("/healthz", s.health)
 	app.GET("/livez", s.live)
+	if cfg.MCP.Enabled && cfg.MCP.ExportEnabled {
+		exports, err := artifact.NewStore(
+			cfg.MCP.ExportDir, cfg.MCP.ExportTTL, cfg.MCP.MaxExportBytes,
+			cfg.MCP.MaxTotalExportBytes, cfg.MCP.MaxExportFiles, cfg.MCP.MaxConcurrentExports,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		s.exports = exports
+		app.HandleWildcard("/exports", exports)
+	}
 
 	if err := s.mountMCP(version); err != nil {
+		if s.exports != nil {
+			_ = s.exports.Close()
+		}
+
 		return nil, err
 	}
 
@@ -74,6 +97,11 @@ func (s *Server) mountMCP(version string) error {
 		scope.MaxCellChars = s.cfg.MCP.MaxCellChars
 		scope.Timeout = s.cfg.MCP.QueryTimeout
 
+		var exports *artifact.Store
+		if endpoint.Export {
+			exports = s.exports
+		}
+
 		opts := mcpserver.Options{
 			Name:            config.ServiceName + "-" + string(endpoint.Permission),
 			Version:         version,
@@ -82,6 +110,10 @@ func (s *Server) mountMCP(version string) error {
 			Stateless:       s.cfg.MCP.Stateless,
 			JSONResponse:    s.cfg.MCP.JSONResponse,
 			Logger:          slog.Default(),
+			Exports:         exports,
+			ExportBaseURL:   strings.TrimRight(s.cfg.MCP.PublicBaseURL, "/"),
+			MaxExportRows:   s.cfg.MCP.MaxExportRows,
+			AllowedOrigins:  s.cfg.MCP.AllowedOrigins,
 		}
 
 		// A session timeout is meaningless without sessions; passing it anyway
@@ -101,6 +133,7 @@ func (s *Server) mountMCP(version string) error {
 			"permission", endpoint.Permission,
 			"connections", len(s.svc.Connections(scope)),
 			"writable", s.svc.CanWrite(scope),
+			"export", endpoint.Export,
 			"stateless", s.cfg.MCP.Stateless,
 		)
 	}
@@ -114,10 +147,22 @@ func (s *Server) Handler() http.Handler {
 	return s.ada
 }
 
+// Close releases temporary export artifacts owned by the server.
+func (s *Server) Close() error {
+	if s.exports == nil {
+		return nil
+	}
+
+	return s.exports.Close()
+}
+
 // Start runs the server until ctx is cancelled, then shuts it down gracefully.
 //
 // ada logs the bound address itself, so nothing is logged here.
 func (s *Server) Start(ctx context.Context) error {
+	if s.exports != nil {
+		defer s.Close()
+	}
 	if err := s.ada.StartWithContext(ctx, s.address); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http server; %w", err)
 	}

@@ -63,7 +63,8 @@ pool:
   max_idle_time: 0
 
 server:
-  host: ""
+  # Protect remote access with authentication and an explicit network policy.
+  host: "0.0.0.0"
   port: "8080"
   shutdown_timeout: 10s
   # Enabled connections must pass a ping before the server starts.
@@ -80,6 +81,7 @@ mcp:
     - path: /mcp
       permission: full
       allow: [local, prod, bas, scratch]
+      export: true
     - path: /mcp/reporting
       permission: read-only
       allow: [prod, bas]
@@ -98,6 +100,18 @@ mcp:
   # Wall-clock limit for one statement, so an agent-issued cartesian join
   # cannot pin a connection until the client gives up.
   query_timeout: 30s
+
+  # Bulk exports are opt-in globally and per explicit endpoint. Their row data
+  # is written to a short-lived download rather than returned to the model.
+  export_enabled: true
+  max_export_rows: 100000
+  max_export_bytes: 104857600
+  max_total_export_bytes: 524288000
+  max_export_files: 100
+  max_concurrent_exports: 2
+  export_ttl: 15m
+  # public_base_url: "https://dbq.example.com"
+  # allowed_origins: ["https://mcp-client.example.com"]
 
   # Stateless is the default and describes what dbq is: nothing is carried
   # between tool calls. Keeping sessions on only adds a failure mode — a request

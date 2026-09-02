@@ -104,16 +104,26 @@ pool:
   max_lifetime: 15m
 
 server:
-  host: ""
+  host: "0.0.0.0" # protect remote access with authentication/network policy
   port: "8080"
   connection_check_timeout: 10s
 
 mcp:
   max_rows: 200
+  export_enabled: true # bulk export is opt-in
+  max_export_rows: 100000
+  max_export_bytes: 104857600 # 100 MiB
+  max_total_export_bytes: 524288000 # 500 MiB across live exports
+  max_export_files: 100
+  max_concurrent_exports: 2
+  export_ttl: 15m
+  # public_base_url: "https://dbq.example.com" # absolute download links behind a proxy
+  # allowed_origins: ["https://mcp-client.example.com"] # exact browser origins
   endpoints:
     - path: /mcp
       permission: full
       allow: [local, prod]
+      export: true
     - path: /mcp/reporting
       permission: read-only
       allow: [prod]
@@ -224,11 +234,15 @@ Database discovery and queries are exposed only through MCP.
 
 `dbq` mounts the configured MCP paths. Each path has a permission ceiling and
 an optional connection allowlist. With no explicit endpoint configuration,
-`/mcp` is mounted with a `full` ceiling.
+`/mcp` is mounted with a `read-only` ceiling. Write access must be configured
+explicitly.
 
 `dbq` does not authenticate MCP traffic itself. Put it behind your own auth;
 separate paths such as `/mcp` and `/mcp/reporting` can receive different
-policies upstream.
+policies upstream. When export is enabled, protect `/exports` with the same
+upstream policy. Export IDs are short-lived capabilities, not a replacement for
+transport authentication. dbq listens on all interfaces by default, so remote
+access must be protected by an upstream authentication and network policy.
 
 The ceiling only ever *restricts*. A connection configured as `read-only` stays
 read-only even on a `full` endpoint; the effective permission is the lower of
@@ -270,6 +284,7 @@ handshake.
 | `dbq_describe_table`    | Columns of one table: type, nullability, default, primary key          |
 | `dbq_schema_context`    | Compact one-line-per-table schema summary, cheap in tokens             |
 | `dbq_query`             | Run one read-only statement; writes are always refused here            |
+| `dbq_export`            | Export a SELECT to a downloadable batched-INSERT `.sql` artifact        |
 | `dbq_execute`           | Run one modifying statement, subject to the permission level           |
 
 `dbq_execute` is **not advertised** on an endpoint where it could never succeed
@@ -288,6 +303,28 @@ orders(id INTEGER pk, user_id INTEGER not null)
 active_users(id INTEGER, name TEXT) [VIEW, not writable]
 ```
 
+`dbq_export` is for moving or saving the rows visible to a `SELECT`. It streams
+the result into batched `INSERT` statements on the server and returns only a
+small manifest (download URL, row count, size, SHA-256 and expiry) through MCP.
+The exported values are never placed in the model context. Download URLs contain
+a random capability ID, expire after `mcp.export_ttl`, and are served with
+`Content-Disposition: attachment` and `Cache-Control: private, no-store`.
+
+Set `mcp.public_base_url` when callers need an absolute URL through a reverse
+proxy; otherwise the tool returns a root-relative `/exports/...` URL. Artifacts
+use a private temporary directory by default, or `mcp.export_dir` when set. One
+export is bounded by `mcp.max_export_rows`, `mcp.max_export_bytes`, and the normal
+`mcp.query_timeout`. The target table and target dialect are explicit, so a
+filtered or projected query can be imported under a different table name or SQL
+dialect.
+
+Bulk export is disabled unless `mcp.export_enabled` is true. With explicit MCP
+endpoints, only endpoints carrying `export: true` advertise the tool. Live
+artifacts are also bounded collectively by `mcp.max_total_export_bytes`,
+`mcp.max_export_files`, and `mcp.max_concurrent_exports`. Expired files are
+removed periodically, generated capability paths are excluded from dbq access
+logs, and process-owned temporary exports are deleted during graceful shutdown.
+
 Ask the agent things like:
 
 - "List my dbq connections"
@@ -303,6 +340,12 @@ model's context:
 | `mcp.max_cell_chars`    | 500     | characters per value → `cells_truncated`   |
 | `mcp.max_schema_tables` | 40      | tables per `dbq_schema_context` call       |
 | `mcp.query_timeout`     | 30s     | wall-clock per statement                   |
+| `mcp.max_export_rows`   | 100000  | rows per downloadable SQL export           |
+| `mcp.max_export_bytes`  | 100 MiB | bytes per downloadable SQL export          |
+| `mcp.export_ttl`        | 15m     | lifetime of an export download link        |
+| `mcp.max_total_export_bytes` | 500 MiB | bytes across all live exports          |
+| `mcp.max_export_files`  | 100     | live downloadable artifacts                |
+| `mcp.max_concurrent_exports` | 2   | simultaneous export jobs                   |
 
 The row cap alone is not enough: one `TEXT` column can hold megabytes, so
 `SELECT * FROM documents` would blow the window even at a small row limit. The

@@ -28,7 +28,14 @@ func TestResolvedEndpointsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvedEndpoints: %v", err)
 	}
-	if len(got) != 1 || got[0].Path != "/mcp" || got[0].Permission != "full" {
+	if len(got) != 1 || got[0].Path != "/mcp" || got[0].Permission != "read-only" {
 		t.Errorf("default endpoint = %+v", got)
+	}
+}
+
+func TestResolvedEndpointsRejectsExportWithoutGlobalOptIn(t *testing.T) {
+	_, err := (MCP{Enabled: true, Endpoints: []Endpoint{{Path: "/mcp", Permission: "read-only", Export: true}}}).ResolvedEndpoints()
+	if err == nil {
+		t.Fatal("endpoint export succeeded while export_enabled is false")
 	}
 }

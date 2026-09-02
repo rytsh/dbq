@@ -88,8 +88,6 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/rakunlabs/ada v0.5.1 h1:EutnPjA/4ONc6d1hqVaZaJpepZxRKXSvHfMr9qvsWwc=
 github.com/rakunlabs/ada v0.5.1/go.mod h1:Zz9W4dNSPINzG8t0kS6LO0ipVOsC5OAVW2Ip9oV0B/Y=
-github.com/rakunlabs/ada/middleware/cors v0.5.1 h1:okF/Nbnlcz+yAbr7Ux8eD6KAEtOhYSboAigfA8LdBxI=
-github.com/rakunlabs/ada/middleware/cors v0.5.1/go.mod h1:QnLErCedHN1gzYRRS2Il96SKv2BTIirZhwBKhzyhmdY=
 github.com/rakunlabs/ada/middleware/log v0.5.1 h1:Ttjs5wS5skCV+7mVEg7IIeLUqkAlMp5btxW4NTu+CpI=
 github.com/rakunlabs/ada/middleware/log v0.5.1/go.mod h1:YvI2FXI0gmj98nAc4HM1Hk252KEBr+3TDPT2U/0CUhc=
 github.com/rakunlabs/ada/middleware/recover v0.5.1 h1:/63jpTVMQzhmcQesKDt/nxoFTbSk9PTkmQsjbaX/ekM=

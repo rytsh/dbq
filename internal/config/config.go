@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -89,7 +91,7 @@ type Connection struct {
 
 // Server holds the HTTP listener settings.
 type Server struct {
-	Host                   string        `cfg:"host"`
+	Host                   string        `cfg:"host" default:"0.0.0.0"`
 	Port                   string        `cfg:"port" default:"8080"`
 	ShutdownTimeout        time.Duration `cfg:"shutdown_timeout" default:"10s"`
 	ConnectionCheckTimeout time.Duration `cfg:"connection_check_timeout" default:"10s"`
@@ -123,6 +125,26 @@ type MCP struct {
 	// query surfaces as dbq's own actionable error rather than a generic
 	// client-side give-up.
 	QueryTimeout time.Duration `cfg:"query_timeout" default:"30s"`
+	// ExportEnabled explicitly enables bulk query exports and their download route.
+	ExportEnabled bool `cfg:"export_enabled"`
+	// ExportDir stores short-lived SQL export artifacts. Empty uses a private
+	// process-specific temporary directory.
+	ExportDir string `cfg:"export_dir"`
+	// ExportTTL controls how long generated download links remain valid.
+	ExportTTL time.Duration `cfg:"export_ttl" default:"15m"`
+	// MaxExportRows and MaxExportBytes bound one generated artifact.
+	MaxExportRows  int   `cfg:"max_export_rows" default:"100000"`
+	MaxExportBytes int64 `cfg:"max_export_bytes" default:"104857600"`
+	// MaxTotalExportBytes, MaxExportFiles and MaxConcurrentExports bound aggregate use.
+	MaxTotalExportBytes  int64 `cfg:"max_total_export_bytes" default:"524288000"`
+	MaxExportFiles       int   `cfg:"max_export_files" default:"100"`
+	MaxConcurrentExports int   `cfg:"max_concurrent_exports" default:"2"`
+	// PublicBaseURL makes export links absolute when dbq is behind a proxy.
+	// Empty returns a root-relative download URL.
+	PublicBaseURL string `cfg:"public_base_url"`
+	// AllowedOrigins permits browser MCP clients from these exact origins.
+	// Same-origin and non-browser requests are accepted without entries.
+	AllowedOrigins []string `cfg:"allowed_origins"`
 	// Stateless runs the MCP handler without session state.
 	//
 	// It defaults on because it describes what dbq actually is: every tool call
@@ -142,11 +164,72 @@ type MCP struct {
 	SessionTimeout time.Duration `cfg:"session_timeout" default:"30m"`
 }
 
+// Validate checks MCP settings whose mistakes would weaken security or produce unusable links.
+func (m MCP) Validate() error {
+	if !m.Enabled {
+		return nil
+	}
+
+	for _, origin := range m.AllowedOrigins {
+		if err := validateWebOrigin(origin, false); err != nil {
+			return fmt.Errorf("mcp: allowed origin %q: %w", origin, err)
+		}
+	}
+
+	if !m.ExportEnabled {
+		return nil
+	}
+
+	if m.ExportTTL < 0 || m.MaxExportRows < 0 || m.MaxExportBytes < 0 ||
+		m.MaxTotalExportBytes < 0 || m.MaxExportFiles < 0 || m.MaxConcurrentExports < 0 {
+		return fmt.Errorf("mcp: export limits and TTL cannot be negative")
+	}
+
+	if m.MaxTotalExportBytes > 0 && m.MaxExportBytes > m.MaxTotalExportBytes {
+		return fmt.Errorf("mcp: max_export_bytes cannot exceed max_total_export_bytes")
+	}
+
+	if m.PublicBaseURL != "" {
+		if err := validateWebOrigin(strings.TrimRight(m.PublicBaseURL, "/"), true); err != nil {
+			return fmt.Errorf("mcp: public_base_url: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func validateWebOrigin(value string, allowPath bool) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("must be an absolute HTTP(S) URL")
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("scheme must be http or https")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("credentials, query and fragment are not allowed")
+	}
+	if !allowPath && parsed.Path != "" {
+		return fmt.Errorf("path is not allowed")
+	}
+	if parsed.Scheme == "http" {
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return fmt.Errorf("non-loopback URLs must use https")
+		}
+	}
+
+	return nil
+}
+
 // Endpoint is one MCP mount with its own permission ceiling and connections.
 type Endpoint struct {
 	Path       string   `cfg:"path"`
 	Permission string   `cfg:"permission"`
 	Allow      []string `cfg:"allow"`
+	// Export exposes dbq_export on this endpoint when MCP export is globally enabled.
+	Export bool `cfg:"export"`
 }
 
 // ResolvedEndpoint is a validated, ready-to-mount MCP endpoint.
@@ -154,12 +237,13 @@ type ResolvedEndpoint struct {
 	Permission database.Permission
 	Path       string
 	Allow      []string
+	Export     bool
 }
 
 // ResolvedEndpoints returns the endpoints that should be mounted.
 //
 // Nothing is mounted when MCP is disabled. With no explicit endpoints, /mcp is
-// mounted with a full ceiling; each connection's permission remains its limit.
+// mounted read-only; write access must be configured explicitly.
 func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 	if !m.Enabled {
 		return nil, nil
@@ -167,7 +251,9 @@ func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 
 	endpoints := m.Endpoints
 	if len(endpoints) == 0 {
-		endpoints = []Endpoint{{Path: "/mcp", Permission: string(database.PermissionFull)}}
+		endpoints = []Endpoint{{
+			Path: "/mcp", Permission: string(database.PermissionReadOnly), Export: m.ExportEnabled,
+		}}
 	}
 
 	var (
@@ -176,6 +262,10 @@ func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 	)
 
 	for _, endpoint := range endpoints {
+		if endpoint.Export && !m.ExportEnabled {
+			return nil, fmt.Errorf("mcp: endpoint %s enables export while export_enabled is false", endpoint.Path)
+		}
+
 		path := endpoint.Path
 		if path == "" {
 			return nil, fmt.Errorf("mcp: endpoint path is required")
@@ -204,6 +294,7 @@ func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 			Permission: permission,
 			Path:       path,
 			Allow:      endpoint.Allow,
+			Export:     endpoint.Export,
 		})
 	}
 

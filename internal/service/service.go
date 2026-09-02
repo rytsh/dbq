@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +150,9 @@ func (s *Service) Ping(ctx context.Context, scope Scope, connection string) erro
 
 // ListTables returns the tables and views of a connection.
 func (s *Service) ListTables(ctx context.Context, scope Scope, connection, schema string) ([]database.Table, error) {
+	ctx, cancel := scope.withTimeout(ctx)
+	defer cancel()
+
 	def, _, err := s.resolve(scope, connection)
 	if err != nil {
 		return nil, err
@@ -164,6 +168,9 @@ func (s *Service) ListTables(ctx context.Context, scope Scope, connection, schem
 
 // DescribeTable returns the column layout of a table.
 func (s *Service) DescribeTable(ctx context.Context, scope Scope, connection, schema, table string) (*database.TableDetail, error) {
+	ctx, cancel := scope.withTimeout(ctx)
+	defer cancel()
+
 	def, _, err := s.resolve(scope, connection)
 	if err != nil {
 		return nil, err
@@ -208,6 +215,9 @@ type SchemaContext struct {
 
 // SchemaContext lists the tables of a connection and describes each one.
 func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaContextRequest) (*SchemaContext, error) {
+	ctx, cancel := scope.withTimeout(ctx)
+	defer cancel()
+
 	def, _, err := s.resolve(scope, req.Connection)
 	if err != nil {
 		return nil, err
@@ -260,6 +270,10 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 	for _, t := range tables {
 		detail, err := database.DescribeTable(ctx, db, def.CatalogType(), t.Schema, t.Name)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+
 			// A table can vanish or be unreadable between listing and
 			// describing; skip it rather than failing the whole context.
 			continue
@@ -272,6 +286,14 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 	out.Compact = compactSchema(out.Tables)
 
 	return out, nil
+}
+
+func (s Scope) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.Timeout <= 0 {
+		return ctx, func() {}
+	}
+
+	return context.WithTimeout(ctx, s.Timeout)
 }
 
 // compactSchema renders each table as a single line, plus its foreign keys:
@@ -382,6 +404,54 @@ func (s *Service) Execute(ctx context.Context, scope Scope, req ExecuteRequest) 
 		MaxRows:      cappedLimit(req.MaxRows, scope.MaxRows, database.DefaultMaxRows),
 		MaxCellChars: cappedLimit(req.MaxCellChars, scope.MaxCellChars, database.DefaultMaxCellChars),
 		Timeout:      scope.Timeout,
+	})
+}
+
+// ExportRequest describes a read query rendered as INSERT statements.
+type ExportRequest struct {
+	Connection    string
+	SQL           string
+	TargetTable   string
+	TargetDialect string
+	BatchSize     int
+	MaxRows       int
+}
+
+// ExportInserts streams query results to w without materializing them in an MCP response.
+func (s *Service) ExportInserts(ctx context.Context, scope Scope, req ExportRequest, w io.Writer) (*database.ExportResult, error) {
+	def, permission, err := s.resolve(scope, req.Connection)
+	if err != nil {
+		return nil, err
+	}
+
+	if req.SQL == "" {
+		return nil, fmt.Errorf("sql is required")
+	}
+
+	if _, err := database.Authorize(def.Name, req.SQL, permission.Min(database.PermissionReadOnly)); err != nil {
+		return nil, err
+	}
+
+	db, err := s.manager.DB(ctx, def.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	dialect := req.TargetDialect
+	if dialect == "" {
+		dialect = def.CatalogType()
+	}
+	dialect, err = database.NormalizeExportDialect(dialect)
+	if err != nil {
+		return nil, err
+	}
+
+	return database.ExportInserts(ctx, db, req.SQL, w, database.ExportOptions{
+		Dialect:   dialect,
+		Table:     req.TargetTable,
+		BatchSize: req.BatchSize,
+		MaxRows:   req.MaxRows,
+		Timeout:   scope.Timeout,
 	})
 }
 
