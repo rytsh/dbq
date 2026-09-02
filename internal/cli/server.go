@@ -1,14 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rytsh/dbq/internal/config"
-	"github.com/rytsh/dbq/internal/database"
 	"github.com/rytsh/dbq/internal/server"
 	"github.com/rytsh/dbq/internal/service"
 )
@@ -17,10 +19,6 @@ type serverFlags struct {
 	Host       string
 	Port       string
 	MCPEnabled bool
-	MCPPath    string
-	// MCPEndpoints selects which permission-scoped MCP endpoints to mount,
-	// replacing whatever the config file enabled.
-	MCPEndpoints []string
 }
 
 // newServerCommand runs dbq as an HTTP service exposing probes and MCP.
@@ -31,13 +29,9 @@ func newServerCommand(global *globalFlags, build BuildInfo) *cobra.Command {
 		Use:   "server",
 		Short: "run dbq as an HTTP and MCP server",
 		Long: "Serve health probes and Model Context Protocol endpoints over HTTP.\n\n" +
-			"One MCP endpoint is mounted per permission level, each on its own path\n" +
-			"(<mcp.path>/read-only, /safe-write, /full), so each can be given its own\n" +
-			"authentication upstream and switched off independently. Only read-only is\n" +
-			"mounted unless you say otherwise. A connection's own permission always\n" +
-			"remains the upper bound.",
+			"Each configured MCP endpoint has its own path, permission ceiling and\n" +
+			"connection allowlist. A connection's own permission remains the upper bound.",
 		Example: "  dbq server\n" +
-			"  dbq server --mcp-endpoints read-only,safe-write\n" +
 			"  dbq server --mcp=false --port 9090",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -49,9 +43,6 @@ func newServerCommand(global *globalFlags, build BuildInfo) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&local.Host, "host", "", "listen host, overrides server.host")
 	flags.StringVar(&local.Port, "port", "", "listen port, overrides server.port")
-	flags.StringVar(&local.MCPPath, "mcp-path", "", "base path for the MCP endpoints, overrides mcp.path")
-	flags.StringSliceVar(&local.MCPEndpoints, "mcp-endpoints", nil,
-		"MCP endpoints to mount: read-only, safe-write, full")
 	flags.BoolVar(&local.MCPEnabled, "mcp", true, "serve the MCP endpoints")
 
 	return cmd
@@ -66,6 +57,10 @@ func runServer(cmd *cobra.Command, global *globalFlags, local *serverFlags, buil
 	}
 	defer svc.Manager().Close() //nolint:errcheck // shutdown path
 
+	if err := checkConnections(ctx, cfg, svc); err != nil {
+		return err
+	}
+
 	// Flags win over the config file, which in turn already won over defaults.
 	if local.Host != "" {
 		cfg.Server.Host = local.Host
@@ -75,18 +70,8 @@ func runServer(cmd *cobra.Command, global *globalFlags, local *serverFlags, buil
 		cfg.Server.Port = local.Port
 	}
 
-	if local.MCPPath != "" {
-		cfg.MCP.Path = local.MCPPath
-	}
-
 	if cmd.Flags().Changed("mcp") {
 		cfg.MCP.Enabled = local.MCPEnabled
-	}
-
-	if len(local.MCPEndpoints) > 0 {
-		if err := applyEndpointFlag(cfg, local.MCPEndpoints); err != nil {
-			return err
-		}
 	}
 
 	srv, err := server.New(cfg, svc, build.Version)
@@ -97,28 +82,28 @@ func runServer(cmd *cobra.Command, global *globalFlags, local *serverFlags, buil
 	return srv.Start(ctx)
 }
 
-// applyEndpointFlag replaces the configured endpoint selection with the one
-// given on the command line, so --mcp-endpoints is an exact list rather than an
-// addition to whatever the config file happened to enable.
-func applyEndpointFlag(cfg *config.Config, names []string) error {
-	cfg.MCP.Endpoints.ReadOnly.Enabled = false
-	cfg.MCP.Endpoints.SafeWrite.Enabled = false
-	cfg.MCP.Endpoints.Full.Enabled = false
+func checkConnections(ctx context.Context, cfg *config.Config, svc *service.Service) error {
+	var errs []error
 
-	for _, name := range names {
-		permission, err := database.ParsePermission(name)
+	for _, info := range svc.Connections(service.FullScope) {
+		checkCtx := ctx
+		cancel := func() {}
+		if cfg.Server.ConnectionCheckTimeout > 0 {
+			checkCtx, cancel = context.WithTimeout(ctx, cfg.Server.ConnectionCheckTimeout)
+		}
+
+		err := svc.Ping(checkCtx, service.FullScope, info.Name)
+		cancel()
 		if err != nil {
-			return fmt.Errorf("--mcp-endpoints: %w", err)
+			errs = append(errs, fmt.Errorf("%s: %w", info.Name, err))
+			continue
 		}
 
-		switch permission {
-		case database.PermissionReadOnly:
-			cfg.MCP.Endpoints.ReadOnly.Enabled = true
-		case database.PermissionSafeWrite:
-			cfg.MCP.Endpoints.SafeWrite.Enabled = true
-		case database.PermissionFull:
-			cfg.MCP.Endpoints.Full.Enabled = true
-		}
+		slog.Info("database connection check succeeded", "connection", info.Name)
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("database connection checks failed: %w", err)
 	}
 
 	return nil

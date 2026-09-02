@@ -101,6 +101,11 @@ func foreignKeyQuery(driver, schema, table string) (string, []any) {
 
 		return q, args
 
+	case "ingres":
+		// Ingres predates information_schema and exposes constraints through
+		// vendor catalogs. Foreign-key discovery can be added independently.
+		return "", nil
+
 	default:
 		// referential_constraints is standard and present on PostgreSQL and
 		// SQL Server; most ODBC targets expose it too.
@@ -187,6 +192,21 @@ func tableQuery(driver, schema string) (string, []any) {
 			WHERE owner NOT IN ('SYS','SYSTEM','XDB','OUTLN','DBSNMP','APPQOSSYS','CTXSYS','MDSYS','ORDSYS','WMSYS','LBACSYS','OLAPSYS','AUDSYS','GSMADMIN_INTERNAL','DVSYS','ORDDATA')
 			ORDER BY 1, 2`, nil
 
+	case "ingres":
+		if schema != "" {
+			return `SELECT TRIM(table_owner), TRIM(table_name),
+				CASE table_type WHEN 'V' THEN 'VIEW' ELSE 'BASE TABLE' END
+				FROM iitables
+				WHERE system_use = 'U' AND table_type IN ('T', 'V') AND table_owner = ?
+				ORDER BY table_owner, table_name`, []any{schema}
+		}
+
+		return `SELECT TRIM(table_owner), TRIM(table_name),
+			CASE table_type WHEN 'V' THEN 'VIEW' ELSE 'BASE TABLE' END
+			FROM iitables
+			WHERE system_use = 'U' AND table_type IN ('T', 'V')
+			ORDER BY table_owner, table_name`, nil
+
 	default:
 		// pgx, sqlserver and most ODBC targets expose information_schema.
 		if schema != "" {
@@ -250,9 +270,27 @@ func describeColumns(ctx context.Context, db *sqlx.DB, driver, schema, table str
 		return sqliteColumns(ctx, db, table)
 	case "godror":
 		return oracleColumns(ctx, db, schema, table)
+	case "ingres":
+		return ingresColumns(ctx, db, schema, table)
 	default:
 		return infoSchemaColumns(ctx, db, schema, table)
 	}
+}
+
+func ingresColumns(ctx context.Context, db *sqlx.DB, schema, table string) ([]Column, error) {
+	q := `SELECT TRIM(column_name), TRIM(column_datatype), column_nulls,
+		'', column_sequence, 0
+		FROM iicolumns WHERE table_name = ?`
+	args := []any{table}
+
+	if schema != "" {
+		q += ` AND table_owner = ?`
+		args = append(args, schema)
+	}
+
+	q += ` ORDER BY column_sequence`
+
+	return scanColumns(ctx, db, q, args, "Y")
 }
 
 func sqliteColumns(ctx context.Context, db *sqlx.DB, table string) ([]Column, error) {

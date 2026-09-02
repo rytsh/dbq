@@ -39,8 +39,13 @@ type Config struct {
 
 // Connection is one named database profile.
 type Connection struct {
+	// Disabled keeps a profile in configuration without exposing or connecting it.
+	Disabled bool `cfg:"disabled"`
 	// Type is the driver name: pgx, odbc, godror, sqlite3 or sqlserver.
 	Type string `cfg:"type"`
+	// Dialect selects database-specific catalog queries when the driver is
+	// generic, for example "ingres" for an Ingres ODBC connection.
+	Dialect string `cfg:"dialect"`
 	// Source is the DSN. Masked in logs because it usually carries a password.
 	Source string `cfg:"source" log:"-"`
 	// Description is free-form text surfaced to MCP clients to help an agent
@@ -53,9 +58,10 @@ type Connection struct {
 
 // Server holds the HTTP listener settings.
 type Server struct {
-	Host            string        `cfg:"host"`
-	Port            string        `cfg:"port" default:"8080"`
-	ShutdownTimeout time.Duration `cfg:"shutdown_timeout" default:"10s"`
+	Host                   string        `cfg:"host"`
+	Port                   string        `cfg:"port" default:"8080"`
+	ShutdownTimeout        time.Duration `cfg:"shutdown_timeout" default:"10s"`
+	ConnectionCheckTimeout time.Duration `cfg:"connection_check_timeout" default:"10s"`
 }
 
 // Address returns the host:port the listener binds to.
@@ -65,20 +71,14 @@ func (s Server) Address() string {
 
 // MCP holds the Model Context Protocol server settings.
 //
-// dbq does not authenticate MCP traffic itself. Instead it mounts one endpoint
-// per permission level at a distinct path, so an operator can apply different
-// authentication rules to each at the reverse proxy, and can turn the more
-// dangerous ones off entirely.
+// dbq does not authenticate MCP traffic itself. Operators can mount multiple
+// paths with separate upstream authentication, permissions and connections.
 type MCP struct {
 	// Enabled turns MCP serving on. When false no endpoint is mounted.
 	Enabled bool `cfg:"enabled" default:"true"`
-	// Path is the base path the per-permission endpoints hang off.
-	Path string `cfg:"path" default:"/mcp"`
-	// Endpoints toggles each permission-scoped endpoint.
-	Endpoints Endpoints `cfg:"endpoints"`
-	// Allow is the default allowlist of connection names exposed over MCP.
-	// Empty means every configured connection. An endpoint may override it.
-	Allow []string `cfg:"allow"`
+	// Endpoints are independently configured MCP paths. Each endpoint applies a
+	// permission ceiling and may restrict which connections it exposes.
+	Endpoints []Endpoint `cfg:"endpoints"`
 	// MaxRows caps rows returned by a single MCP tool call.
 	MaxRows int `cfg:"max_rows" default:"200"`
 	// MaxSchemaTables caps how many tables dbq_schema_context describes in one call.
@@ -111,24 +111,11 @@ type MCP struct {
 	SessionTimeout time.Duration `cfg:"session_timeout" default:"30m"`
 }
 
-// Endpoints is the set of permission-scoped MCP endpoints.
-//
-// Only read-only is on by default: exposing write access to an AI agent is a
-// decision the operator has to make deliberately.
-type Endpoints struct {
-	ReadOnly  Endpoint `cfg:"read_only"`
-	SafeWrite Endpoint `cfg:"safe_write"`
-	Full      Endpoint `cfg:"full"`
-}
-
-// Endpoint is one permission-scoped MCP mount.
+// Endpoint is one MCP mount with its own permission ceiling and connections.
 type Endpoint struct {
-	// Enabled mounts the endpoint.
-	Enabled bool `cfg:"enabled"`
-	// Path overrides the derived path (<mcp.path>/<permission>).
-	Path string `cfg:"path"`
-	// Allow overrides mcp.allow for this endpoint only.
-	Allow []string `cfg:"allow"`
+	Path       string   `cfg:"path"`
+	Permission string   `cfg:"permission"`
+	Allow      []string `cfg:"allow"`
 }
 
 // ResolvedEndpoint is a validated, ready-to-mount MCP endpoint.
@@ -140,43 +127,27 @@ type ResolvedEndpoint struct {
 
 // ResolvedEndpoints returns the endpoints that should be mounted.
 //
-// Nothing is mounted when MCP is disabled or every endpoint is off; the caller
-// decides whether that is an error.
+// Nothing is mounted when MCP is disabled. With no explicit endpoints, /mcp is
+// mounted with a full ceiling; each connection's permission remains its limit.
 func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 	if !m.Enabled {
 		return nil, nil
 	}
 
-	base := m.Path
-	if base == "" {
-		base = "/mcp"
-	}
-
-	base = strings.TrimSuffix(base, "/")
-
-	candidates := []struct {
-		permission database.Permission
-		endpoint   Endpoint
-	}{
-		{database.PermissionReadOnly, m.Endpoints.ReadOnly},
-		{database.PermissionSafeWrite, m.Endpoints.SafeWrite},
-		{database.PermissionFull, m.Endpoints.Full},
+	endpoints := m.Endpoints
+	if len(endpoints) == 0 {
+		endpoints = []Endpoint{{Path: "/mcp", Permission: string(database.PermissionFull)}}
 	}
 
 	var (
-		out   []ResolvedEndpoint
-		seen  = map[string]database.Permission{}
-		paths []string
+		out  []ResolvedEndpoint
+		seen = map[string]database.Permission{}
 	)
 
-	for _, c := range candidates {
-		if !c.endpoint.Enabled {
-			continue
-		}
-
-		path := c.endpoint.Path
+	for _, endpoint := range endpoints {
+		path := endpoint.Path
 		if path == "" {
-			path = base + "/" + string(c.permission)
+			return nil, fmt.Errorf("mcp: endpoint path is required")
 		}
 
 		if !strings.HasPrefix(path, "/") {
@@ -185,38 +156,24 @@ func (m MCP) ResolvedEndpoints() ([]ResolvedEndpoint, error) {
 
 		path = strings.TrimSuffix(path, "/")
 
-		// Two permission levels on one path would make the effective
-		// permission depend on mount order, which is not something an
-		// operator should have to reason about.
+		permission, err := database.ParsePermission(endpoint.Permission)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: endpoint %s: %w", path, err)
+		}
+
 		if other, dup := seen[path]; dup {
 			return nil, fmt.Errorf(
-				"mcp: endpoints %q and %q both use path %s", other, c.permission, path,
+				"mcp: endpoints %q and %q both use path %s", other, permission, path,
 			)
 		}
 
-		seen[path] = c.permission
-		paths = append(paths, path)
-
-		allow := c.endpoint.Allow
-		if len(allow) == 0 {
-			allow = m.Allow
-		}
+		seen[path] = permission
 
 		out = append(out, ResolvedEndpoint{
-			Permission: c.permission,
+			Permission: permission,
 			Path:       path,
-			Allow:      allow,
+			Allow:      endpoint.Allow,
 		})
-	}
-
-	// A path that prefixes another would swallow it, because each endpoint is
-	// also mounted as a wildcard to catch client-appended segments.
-	for _, a := range paths {
-		for _, b := range paths {
-			if a != b && strings.HasPrefix(b, a+"/") {
-				return nil, fmt.Errorf("mcp: path %s is nested under %s", b, a)
-			}
-		}
 	}
 
 	return out, nil
@@ -239,13 +196,6 @@ func Load(ctx context.Context) (*Config, error) {
 		return nil, fmt.Errorf("set log level %s; %w", cfg.LogLevel, err)
 	}
 
-	// Sane default: MCP on with nothing selected means read-only only. Writing
-	// through an AI agent has to be opted into explicitly. To serve no MCP at
-	// all, set mcp.enabled to false.
-	if cfg.MCP.Enabled && !cfg.MCP.Endpoints.AnyEndpointEnabled() {
-		cfg.MCP.Endpoints.ReadOnly.Enabled = true
-	}
-
 	slog.Debug("loaded configuration", "config", chu.MarshalMap(cfg))
 
 	return cfg, nil
@@ -257,6 +207,10 @@ func (c *Config) ConnectionDefs() ([]database.ConnectionDef, error) {
 	defs := make([]database.ConnectionDef, 0, len(c.Connections))
 
 	for name, conn := range c.Connections {
+		if conn.Disabled {
+			continue
+		}
+
 		perm, err := database.ParsePermission(conn.Permission)
 		if err != nil {
 			return nil, fmt.Errorf("connection %q: %w", name, err)
@@ -265,6 +219,7 @@ func (c *Config) ConnectionDefs() ([]database.ConnectionDef, error) {
 		defs = append(defs, database.ConnectionDef{
 			Name:        name,
 			Type:        conn.Type,
+			Dialect:     conn.Dialect,
 			Source:      conn.Source,
 			Description: conn.Description,
 			Permission:  perm,
@@ -272,9 +227,4 @@ func (c *Config) ConnectionDefs() ([]database.ConnectionDef, error) {
 	}
 
 	return defs, nil
-}
-
-// AnyEndpointEnabled reports whether at least one MCP endpoint is switched on.
-func (e Endpoints) AnyEndpointEnabled() bool {
-	return e.ReadOnly.Enabled || e.SafeWrite.Enabled || e.Full.Enabled
 }

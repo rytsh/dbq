@@ -56,7 +56,7 @@ func New(cfg *config.Config, svc *service.Service, version string) (*Server, err
 	return s, nil
 }
 
-// mountMCP mounts one MCP endpoint per enabled permission level.
+// mountMCP mounts every configured MCP endpoint.
 //
 // Splitting by permission rather than authenticating inside dbq is deliberate:
 // each path can be given its own authentication and network policy upstream,
@@ -92,10 +92,9 @@ func (s *Server) mountMCP(version string) error {
 
 		handler := mcpserver.Handler(mcpserver.New(s.svc, opts), opts)
 
-		// The transport serves POST/GET/DELETE on the mounted path itself, and
-		// some clients append a trailing segment, so both forms are registered.
+		// Mount endpoints exactly so /mcp and /mcp/abc can coexist.
 		s.ada.Handle(endpoint.Path, handler)
-		s.ada.HandleWildcard(endpoint.Path+"/", handler)
+		s.ada.Handle(endpoint.Path+"/", handler)
 
 		slog.Info("mcp endpoint mounted",
 			"path", endpoint.Path,

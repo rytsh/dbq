@@ -158,7 +158,7 @@ func (s *Service) ListTables(ctx context.Context, scope Scope, connection, schem
 		return nil, err
 	}
 
-	return database.ListTables(ctx, db, def.Type, schema)
+	return database.ListTables(ctx, db, def.CatalogType(), schema)
 }
 
 // DescribeTable returns the column layout of a table.
@@ -173,7 +173,7 @@ func (s *Service) DescribeTable(ctx context.Context, scope Scope, connection, sc
 		return nil, err
 	}
 
-	return database.DescribeTable(ctx, db, def.Type, schema, table)
+	return database.DescribeTable(ctx, db, def.CatalogType(), schema, table)
 }
 
 // SchemaContextRequest asks for a compact description of a whole schema.
@@ -217,7 +217,7 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 		return nil, err
 	}
 
-	tables, err := database.ListTables(ctx, db, def.Type, req.Schema)
+	tables, err := database.ListTables(ctx, db, def.CatalogType(), req.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 	}
 
 	for _, t := range tables {
-		detail, err := database.DescribeTable(ctx, db, def.Type, t.Schema, t.Name)
+		detail, err := database.DescribeTable(ctx, db, def.CatalogType(), t.Schema, t.Name)
 		if err != nil {
 			// A table can vanish or be unreadable between listing and
 			// describing; skip it rather than failing the whole context.

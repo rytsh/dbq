@@ -40,8 +40,24 @@ type Options struct {
 	Logger *slog.Logger
 }
 
+type minLevelHandler struct {
+	slog.Handler
+	level slog.Level
+}
+
+func (h minLevelHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= h.level && h.Handler.Enabled(ctx, level)
+}
+
 // New builds an MCP server exposing dbq's tools.
 func New(svc *service.Service, opts Options) *mcp.Server {
+	logger := opts.Logger
+	if logger != nil {
+		// The SDK emits a connect/disconnect INFO trio for every stateless HTTP
+		// request, where an empty session ID is expected. Keep actionable logs.
+		logger = slog.New(minLevelHandler{Handler: logger.Handler(), level: slog.LevelWarn})
+	}
+
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:        opts.Name,
@@ -51,7 +67,7 @@ func New(svc *service.Service, opts Options) *mcp.Server {
 		},
 		&mcp.ServerOptions{
 			Instructions: buildInstructions(svc, opts),
-			Logger:       opts.Logger,
+			Logger:       logger,
 		},
 	)
 

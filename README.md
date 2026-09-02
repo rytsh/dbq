@@ -68,20 +68,28 @@ connections:
     description: "production, reporting replica"
     permission: read-only
 
+  bas:
+    disabled: true # retained in config but not exposed or checked
+    type: odbc
+    dialect: ingres
+    source: "DSN=bas"
+    description: "Ingres BAS database"
+    permission: read-only
+
 server:
   host: ""
   port: "8080"
+  connection_check_timeout: 10s
 
 mcp:
-  path: /mcp
   max_rows: 200
   endpoints:
-    read_only:
-      enabled: true
-    safe_write:
-      enabled: false
-    full:
-      enabled: false
+    - path: /mcp
+      permission: full
+      allow: [local, prod]
+    - path: /mcp/reporting
+      permission: read-only
+      allow: [prod]
 ```
 
 Put secrets in the environment rather than the file:
@@ -165,27 +173,23 @@ Database discovery and queries are exposed only through MCP.
 
 ## MCP server
 
-`dbq` mounts **one MCP endpoint per permission level**, each on its own path:
+`dbq` mounts the configured MCP paths. Each path has a permission ceiling and
+an optional connection allowlist. With no explicit endpoint configuration,
+`/mcp` is mounted with a `full` ceiling.
 
-| Path              | Ceiling      | Default |
-| ----------------- | ------------ | ------- |
-| `/mcp/read-only`  | `read-only`  | on      |
-| `/mcp/safe-write` | `safe-write` | off     |
-| `/mcp/full`       | `full`       | off     |
-
-That split is the security model. `dbq` does not authenticate MCP traffic
-itself — put it behind your own auth — but because each level lives on its own
-path you can give each one a different policy upstream, and leave the dangerous
-ones unmounted entirely. A disabled endpoint returns `404`; it is not mounted at
-all.
+`dbq` does not authenticate MCP traffic itself. Put it behind your own auth;
+separate paths such as `/mcp` and `/mcp/reporting` can receive different
+policies upstream.
 
 The ceiling only ever *restricts*. A connection configured as `read-only` stays
-read-only even on `/mcp/full`; the effective permission is the lower of the two.
+read-only even on a `full` endpoint; the effective permission is the lower of
+the endpoint and connection permissions. This allows one endpoint to expose a
+read-only production database and a full-access local database safely.
 
 Enable more at runtime:
 
 ```sh
-dbq server --mcp-endpoints read-only,safe-write
+dbq server
 dbq server --mcp=false            # no MCP at all
 ```
 
@@ -202,7 +206,7 @@ handshake.
   "mcpServers": {
     "dbq": {
       "type": "http",
-      "url": "http://localhost:8080/mcp/read-only"
+      "url": "http://localhost:8080/mcp"
     }
   }
 }

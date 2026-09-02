@@ -18,6 +18,7 @@ var ErrUnknownConnection = errors.New("unknown connection")
 type ConnectionDef struct {
 	Name        string
 	Type        string
+	Dialect     string
 	Source      string
 	Description string
 	Permission  Permission
@@ -28,6 +29,7 @@ type ConnectionDef struct {
 type ConnectionInfo struct {
 	Name        string     `json:"name"`
 	Type        string     `json:"type"`
+	Dialect     string     `json:"dialect,omitempty"`
 	Description string     `json:"description,omitempty"`
 	Permission  Permission `json:"permission"`
 }
@@ -39,11 +41,20 @@ type connEntry struct {
 	db *sqlx.DB
 }
 
+// CatalogType returns the database dialect used for schema introspection.
+// Most drivers identify their dialect directly; ODBC connections may override it.
+func (d ConnectionDef) CatalogType() string {
+	if d.Dialect != "" {
+		return d.Dialect
+	}
+
+	return d.Type
+}
+
 // Manager owns the connection pools for every configured profile.
 //
-// Pools are opened lazily on first use so that starting the server does not
-// require every configured database to be reachable, and a database that is
-// down only fails the requests that target it.
+// Pools are opened lazily on first use. The HTTP server explicitly pings every
+// enabled connection at startup; other commands only open the one they use.
 type Manager struct {
 	entries map[string]*connEntry
 	names   []string
@@ -108,6 +119,7 @@ func (m *Manager) List() []ConnectionInfo {
 		out = append(out, ConnectionInfo{
 			Name:        def.Name,
 			Type:        def.Type,
+			Dialect:     def.Dialect,
 			Description: def.Description,
 			Permission:  def.Permission,
 		})

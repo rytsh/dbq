@@ -30,9 +30,18 @@ connections:
     permission: read-only
 
   legacy:
+    # Keep a connection profile for later without exposing or checking it.
+    disabled: true
     type: sqlserver
     source: "sqlserver://user:pass@mssql.internal:1433?database=legacy"
     description: "legacy billing system"
+    permission: read-only
+
+  bas:
+    type: odbc
+    dialect: ingres
+    source: "DSN=bas"
+    description: "Ingres BAS database"
     permission: read-only
 
   scratch:
@@ -44,32 +53,23 @@ server:
   host: ""
   port: "8080"
   shutdown_timeout: 10s
+  # Enabled connections must pass a ping before the server starts.
+  connection_check_timeout: 10s
 
 mcp:
   # Set to false to serve only the health and liveness probes.
   enabled: true
 
-  # Base path the per-permission endpoints hang off.
-  path: /mcp
-
-  # One endpoint per permission level, each on its own path so you can apply a
-  # different authentication policy to each at your proxy. A level that is not
-  # enabled is not mounted and returns 404.
-  #
-  # The level is a ceiling, never a grant: a connection configured as read-only
-  # stays read-only even on the /mcp/full endpoint.
+  # Each path has its own permission ceiling and optional connection allowlist.
+  # Connection permissions remain an upper bound, so prod stays read-only even
+  # on the full endpoint.
   endpoints:
-    read_only:
-      enabled: true
-      # path: /mcp/read-only   # derived from mcp.path when omitted
-    safe_write:
-      enabled: false
-      # allow: [local, scratch]  # overrides mcp.allow for this endpoint
-    full:
-      enabled: false
-
-  # Connections exposed over MCP. Empty means all of them.
-  allow: []
+    - path: /mcp
+      permission: full
+      allow: [local, prod, bas, scratch]
+    - path: /mcp/reporting
+      permission: read-only
+      allow: [prod, bas]
 
   # Cap on rows returned by one tool call. Responses set truncated=true when hit.
   max_rows: 200

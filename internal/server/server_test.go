@@ -32,12 +32,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 		Server: config.Server{Port: "0", ShutdownTimeout: time.Second},
 		MCP: config.MCP{
 			Enabled:   true,
-			Path:      "/mcp",
 			MaxRows:   10,
 			Stateless: true,
-			Endpoints: config.Endpoints{
-				ReadOnly:  config.Endpoint{Enabled: true},
-				SafeWrite: config.Endpoint{Enabled: true},
+			Endpoints: []config.Endpoint{
+				{Path: "/mcp", Permission: "read-only"},
+				{Path: "/mcp/write", Permission: "safe-write"},
 			},
 		},
 	}
@@ -162,7 +161,7 @@ func TestRESTEndpointsNotMounted(t *testing.T) {
 }
 
 // connectMCP performs a real MCP handshake against one of the permission-scoped
-// endpoints, e.g. path "/mcp/read-only".
+// endpoints, e.g. path "/mcp".
 func connectMCP(t *testing.T, ts *httptest.Server, path string) *mcp.ClientSession {
 	t.Helper()
 
@@ -182,8 +181,8 @@ func connectMCP(t *testing.T, ts *httptest.Server, path string) *mcp.ClientSessi
 }
 
 const (
-	pathReadOnly  = "/mcp/read-only"
-	pathSafeWrite = "/mcp/safe-write"
+	pathReadOnly  = "/mcp"
+	pathSafeWrite = "/mcp/write"
 	pathFull      = "/mcp/full"
 )
 
@@ -429,8 +428,7 @@ func TestMCPSafeWriteEndpointHonoursConnectionPermission(t *testing.T) {
 	assertRowCount(t, ts, 2)
 }
 
-// TestMCPDisabledEndpointNotMounted verifies a permission level that was not
-// enabled is simply absent, rather than mounted and guarded.
+// TestMCPUnconfiguredEndpointNotMounted verifies an absent path returns 404.
 func TestMCPDisabledEndpointNotMounted(t *testing.T) {
 	ts := newTestServer(t)
 
