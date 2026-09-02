@@ -30,6 +30,22 @@ func TestBypasses(t *testing.T) {
 
 		{"mysql executable comment", "SHOW TRIGGERS; /*!50000 DELETE FROM t */", KindUnknown},
 		{"explain analyze write", "EXPLAIN ANALYZE DELETE FROM users", KindWrite},
+
+		// MySQL only treats -- as a comment when whitespace follows it, so
+		// `1--1` is arithmetic and the batch is real on that engine.
+		{"mysql dash dash without space", "SELECT 1--1; DROP TABLE users", KindUnknown},
+		{"mysql dash dash before semicolon", "SELECT 1 --; DROP TABLE users", KindUnknown},
+
+		// PRAGMA can change connection and schema state on SQLite.
+		{"pragma assignment", "PRAGMA journal_mode = WAL", KindSession},
+		{"pragma call form", "PRAGMA writable_schema(ON)", KindSession},
+		{"pragma schema qualified assignment", "PRAGMA main.foreign_keys = OFF", KindSession},
+		{"pragma maintenance", "PRAGMA wal_checkpoint", KindSchema},
+		{"pragma incremental vacuum", "PRAGMA incremental_vacuum", KindSchema},
+		{"pragma optimize", "PRAGMA optimize", KindSchema},
+		{"pragma unknown", "PRAGMA something_new", KindSchema},
+		{"pragma read setting", "PRAGMA journal_mode", KindRead},
+		{"pragma read query", "PRAGMA main.table_info(users)", KindRead},
 	}
 
 	for _, tt := range tests {
@@ -59,6 +75,14 @@ func TestBypassesAreRefusedReadOnly(t *testing.T) {
 		"SHOW TRIGGERS; /*!50000 DELETE FROM t */",
 		"EXPLAIN ANALYZE DELETE FROM users",
 		"SELECT 1 /* /* nested */ ; DROP TABLE users */",
+		"SELECT 1--1; DROP TABLE users",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA writable_schema(ON)",
+		"PRAGMA wal_checkpoint",
+		"PRAGMA optimize",
+		"DELETE FROM t WHERE NOT (id = 1 AND 1 = 2)",
+		"DELETE FROM t WHERE NOT (id <> id OR 1 = 2)",
+		"DELETE FROM t WHERE NOT (id NOT BETWEEN id AND id)",
 	}
 
 	for _, sql := range sqls {
@@ -170,6 +194,13 @@ func TestUnboundedWrites(t *testing.T) {
 		{"different values or", "DELETE FROM users WHERE status = 'a' OR status <> 'b'", false},
 		{"like prefix", "DELETE FROM users WHERE name LIKE 'admin%'", false},
 		{"in list", "DELETE FROM users WHERE id IN (1, 2, 3)", false},
+		{"between range", "DELETE FROM users WHERE id BETWEEN 1 AND 5", false},
+		{"or with between", "DELETE FROM users WHERE id = 9 OR id BETWEEN 1 AND 5", false},
+		{"not equal", "DELETE FROM users WHERE NOT id = 1", false},
+		{"not between self", "DELETE FROM users WHERE id NOT BETWEEN id AND id", false},
+		{"negated between self", "DELETE FROM users WHERE NOT id BETWEEN id AND id", false},
+		{"insert scalar subquery in values", "INSERT INTO t (a) VALUES ((SELECT max(a) FROM t))", false},
+		{"insert default values", "INSERT INTO t DEFAULT VALUES", false},
 
 		// Unbounded: no predicate.
 		{"delete all", "DELETE FROM users", true},
@@ -188,6 +219,15 @@ func TestUnboundedWrites(t *testing.T) {
 		// Unbounded: self comparison.
 		{"self comparison", "DELETE FROM users WHERE id = id", true},
 		{"self comparison fn", "DELETE FROM users WHERE lower(email) = lower(email)", true},
+		{"negated self inequality", "DELETE FROM users WHERE NOT (id <> id)", true},
+		{"negated self less", "DELETE FROM users WHERE NOT id < id", true},
+		{"double negated self equality", "DELETE FROM users WHERE NOT NOT id = id", true},
+		{"between self", "DELETE FROM users WHERE id BETWEEN id AND id", true},
+		{"negated not between self", "DELETE FROM users WHERE NOT (id NOT BETWEEN id AND id)", true},
+		{"negated compound and", "DELETE FROM users WHERE NOT (id = 1 AND 1 = 2)", true},
+		{"negated compound or", "DELETE FROM users WHERE NOT (id <> id OR 1 = 2)", true},
+		{"between as alias", "DELETE FROM users AS between WHERE between.id = between.id AND 1 = 1", true},
+		{"between as column", "DELETE FROM users WHERE between = between AND id = id", true},
 
 		// Unbounded: match-everything patterns.
 		{"like percent", "DELETE FROM users WHERE name LIKE '%'", true},
@@ -212,6 +252,12 @@ func TestUnboundedWrites(t *testing.T) {
 
 		// Unbounded: reach-extending INSERT forms.
 		{"insert select", "INSERT INTO t SELECT * FROM other", true},
+		{"insert parenthesised select", "INSERT INTO t (SELECT * FROM other)", true},
+		{"insert columns parenthesised select", "INSERT INTO t (a, b) (SELECT a, b FROM other)", true},
+		{"insert table", "INSERT INTO t TABLE other", true},
+		{"insert doubly parenthesised select", "INSERT INTO t ((SELECT * FROM other))", true},
+		{"insert set subquery", "INSERT INTO t SET a = (SELECT max(a) FROM other)", true},
+		{"insert cte", "INSERT INTO t WITH x AS (SELECT 1) SELECT * FROM x", true},
 		{"insert on duplicate key", "INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a = 1", true},
 		{"insert on conflict do update", "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET a = 1", true},
 		{"replace into", "REPLACE INTO t VALUES (1)", true},

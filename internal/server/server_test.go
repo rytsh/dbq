@@ -109,7 +109,7 @@ func TestHealthz(t *testing.T) {
 		t.Errorf("status = %q, want ok", body.Status)
 	}
 
-	if len(body.Connections) != 2 { //nolint:mnd // ro + rw
+	if len(body.Connections) != 2 {
 		t.Errorf("connections = %v, want 2 entries", body.Connections)
 	}
 }

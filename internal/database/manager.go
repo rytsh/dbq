@@ -22,6 +22,8 @@ type ConnectionDef struct {
 	Source      string
 	Description string
 	Permission  Permission
+	// Pool tunes the connection pool. Zero fields use DefaultPool.
+	Pool PoolConfig
 }
 
 // ConnectionInfo is the redacted view of a connection, safe to return over the
@@ -168,7 +170,7 @@ func (m *Manager) DB(ctx context.Context, name string) (*sqlx.DB, error) {
 		return entry.db, nil
 	}
 
-	db, err := ConnectDB(ctx, entry.def.Type, entry.def.Source)
+	db, err := ConnectDB(ctx, entry.def.Type, entry.def.Source, entry.def.Pool)
 	if err != nil {
 		return nil, fmt.Errorf("connection %q: %w", entry.def.Name, err)
 	}

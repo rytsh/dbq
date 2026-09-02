@@ -1,3 +1,5 @@
+// Package database owns connections, statement classification, execution and
+// schema introspection.
 package database
 
 import "fmt"
@@ -273,6 +275,10 @@ func analyzeVerb(ts []token) Analysis {
 
 	switch kind {
 	case KindRead:
+		if head.is("pragma") {
+			return analyzePragma(ts)
+		}
+
 		return analyzeRead(ts)
 	case KindWrite:
 		return analyzeWrite(head.Text, ts)
@@ -398,6 +404,76 @@ func analyzeRead(ts []token) Analysis {
 
 var lockingModes = map[string]bool{"update": true, "share": true, "key": true, "no": true}
 
+// pragmaQueries are the SQLite pragmas that take an argument in call form and
+// only read: PRAGMA table_info(t). Every other pragma with an argument, in
+// either `PRAGMA x = v` or `PRAGMA x(v)` form, changes connection or schema
+// state, which cannot be allowed on a pooled connection.
+var pragmaQueries = map[string]bool{
+	"table_info": true, "table_xinfo": true, "table_list": true,
+	"index_list": true, "index_info": true, "index_xinfo": true,
+	"foreign_key_list": true, "foreign_key_check": true,
+	"integrity_check": true, "quick_check": true,
+	"function_list": true, "module_list": true, "pragma_list": true,
+	"collation_list": true, "database_list": true, "compile_options": true,
+}
+
+// pragmaReadable are the argument-less pragmas that only report a value or
+// run a check. Everything else in bare form (wal_checkpoint, optimize,
+// incremental_vacuum, shrink_memory, or a pragma dbq does not know) does
+// maintenance work and needs full access.
+var pragmaReadable = map[string]bool{
+	"application_id": true, "auto_vacuum": true, "automatic_index": true,
+	"busy_timeout": true, "cache_size": true, "cache_spill": true,
+	"cell_size_check": true, "checkpoint_fullfsync": true, "collation_list": true,
+	"compile_options": true, "data_version": true, "database_list": true,
+	"defer_foreign_keys": true, "encoding": true, "foreign_key_check": true,
+	"foreign_keys": true, "freelist_count": true, "fullfsync": true,
+	"function_list": true, "integrity_check": true, "journal_mode": true,
+	"journal_size_limit": true, "legacy_alter_table": true, "locking_mode": true,
+	"max_page_count": true, "mmap_size": true, "module_list": true,
+	"page_count": true, "page_size": true, "pragma_list": true, "query_only": true,
+	"quick_check": true, "read_uncommitted": true, "recursive_triggers": true,
+	"reverse_unordered_selects": true, "schema_version": true, "secure_delete": true,
+	"synchronous": true, "table_list": true, "temp_store": true, "threads": true,
+	"trusted_schema": true, "user_version": true, "wal_autocheckpoint": true,
+}
+
+// analyzePragma separates PRAGMA queries from PRAGMA assignments and
+// maintenance commands.
+func analyzePragma(ts []token) Analysis {
+	refused := Analysis{
+		Kind:    KindSession,
+		Refused: true,
+		Reason: "PRAGMA assignments change connection or schema state, which would leak " +
+			"into unrelated queries on a pooled connection",
+	}
+
+	name := ""
+
+	for i := 1; i < len(ts); i++ {
+		switch {
+		case ts[i].Type == tPunct && ts[i].Text == "=":
+			return refused
+		case ts[i].Type == tPunct && ts[i].Text == "(":
+			if !pragmaQueries[name] {
+				return refused
+			}
+
+			return Analysis{Kind: KindRead}
+		case ts[i].Type == tWord:
+			// The last word before the argument is the pragma name; a schema
+			// prefix such as main.table_info is skipped over.
+			name = ts[i].Text
+		}
+	}
+
+	if pragmaReadable[name] || pragmaQueries[name] {
+		return Analysis{Kind: KindRead}
+	}
+
+	return Analysis{Kind: KindSchema, Reason: "PRAGMA " + name + " performs maintenance work or is not known to be read-only"}
+}
+
 func wordAt(ts []token, i int) (string, bool) {
 	if i < 0 || i >= len(ts) || ts[i].Type != tWord {
 		return "", false
@@ -427,8 +503,16 @@ func analyzeWrite(verb string, ts []token) Analysis {
 // analyzeInsert treats only a plain INSERT ... VALUES as bounded. An
 // INSERT ... SELECT inserts however many rows the query returns, and a conflict
 // clause turns the statement into an update of unknown reach.
+//
+// The source query may be parenthesised any number of times,
+// `INSERT INTO t ((SELECT ...))`, so a SELECT at any depth counts as the
+// source unless a VALUES clause has already been seen, in which case it is a
+// scalar subquery inside a value. A SELECT before VALUES in any other position
+// (MySQL's INSERT ... SET a = (SELECT ...)) is rare and inserts one row, but
+// telling the two apart needs a parser, so it is pushed up to full.
 func analyzeInsert(ts []token) Analysis {
 	depth := 0
+	valuesSeen := false
 
 	for i := range ts {
 		if ts[i].Type == tPunct {
@@ -442,13 +526,24 @@ func analyzeInsert(ts []token) Analysis {
 			continue
 		}
 
-		if ts[i].Type != tWord || depth != 0 {
+		if ts[i].Type != tWord {
+			continue
+		}
+
+		if !valuesSeen {
+			switch ts[i].Text {
+			case "select", "with", "table":
+				return Analysis{Kind: KindWrite, Unbounded: true, Reason: "INSERT ... SELECT inserts an unbounded number of rows"}
+			}
+		}
+
+		if depth != 0 {
 			continue
 		}
 
 		switch ts[i].Text {
-		case "select", "with":
-			return Analysis{Kind: KindWrite, Unbounded: true, Reason: "INSERT ... SELECT inserts an unbounded number of rows"}
+		case "values":
+			valuesSeen = true
 		case "overwrite":
 			return Analysis{Kind: KindWrite, Unbounded: true, Reason: "INSERT OVERWRITE replaces existing data"}
 		case "duplicate":

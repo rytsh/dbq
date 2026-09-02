@@ -108,6 +108,12 @@ func leafIsUnbounded(ts []token) (string, bool) {
 		return "has a WHERE clause that references no column, so it matches every row", true
 	}
 
+	// NOT over a compound predicate would need De Morgan reasoning to prove
+	// selective: NOT (id = 1 AND 1 = 2) matches every row. Fail closed.
+	if isNegatedCompound(ts) {
+		return "has a negated compound predicate, which cannot be shown to be selective", true
+	}
+
 	if isSelfComparison(ts) {
 		return "has a WHERE clause comparing a value with itself, which matches every row", true
 	}
@@ -214,9 +220,27 @@ var valueKeywords = map[string]bool{
 	"session_user": true, "system_user": true, "user": true, "sysdate": true,
 }
 
-// isSelfComparison detects `X = X` where both sides are the same token run.
+// isSelfComparison detects `X = X` where both sides are the same token run,
+// and the negated forms `NOT X <> X` and `NOT X < X` that mean the same thing.
 func isSelfComparison(ts []token) bool {
+	ts = strip(ts)
+
+	negated := false
+	for len(ts) > 0 && ts[0].is("not") {
+		negated = !negated
+		ts = strip(ts[1:])
+	}
+
 	ops := map[string]bool{"=": true, ">=": true, "<=": true, "<=>": true}
+	if negated {
+		ops = map[string]bool{"<>": true, "!=": true, "<": true, ">": true}
+	}
+
+	if self, inverted := isSelfBetween(ts); self {
+		// BETWEEN matches everything, NOT BETWEEN nothing; an outer NOT
+		// flips either.
+		return negated == inverted
+	}
 
 	for i := range ts {
 		if ts[i].Type != tPunct || !ops[ts[i].Text] {
@@ -232,6 +256,47 @@ func isSelfComparison(ts []token) bool {
 	}
 
 	return false
+}
+
+// isNegatedCompound reports whether the leaf is `NOT (... AND/OR ...)`.
+func isNegatedCompound(ts []token) bool {
+	ts = strip(ts)
+	if len(ts) == 0 || !ts[0].is("not") {
+		return false
+	}
+
+	for len(ts) > 0 && ts[0].is("not") {
+		ts = strip(ts[1:])
+	}
+
+	return len(splitTopLevel(ts, "and")) > 1 || len(splitTopLevel(ts, "or")) > 1
+}
+
+// isSelfBetween detects `X [NOT] BETWEEN X AND X`. self reports whether the
+// bounds equal the subject; inverted reports the NOT BETWEEN form, which
+// matches nothing rather than everything, so the caller must combine it with
+// its own negation.
+func isSelfBetween(ts []token) (self, inverted bool) {
+	for i := range ts {
+		if !ts[i].is("between") {
+			continue
+		}
+
+		bounds := splitTopLevel(ts[i+1:], "and")
+		if len(bounds) != 2 {
+			return false, false
+		}
+
+		subject := strip(ts[:i])
+		if len(subject) > 0 && subject[len(subject)-1].is("not") {
+			inverted = true
+			subject = strip(subject[:len(subject)-1])
+		}
+
+		return len(subject) > 0 && tokensEqual(subject, bounds[0]) && tokensEqual(subject, bounds[1]), inverted
+	}
+
+	return false, false
 }
 
 // matchesEverythingLike detects LIKE / ILIKE against a pattern of only '%'.
@@ -258,11 +323,15 @@ func isAllPercent(s string) bool {
 }
 
 // splitTopLevel splits a token run on a keyword appearing at paren depth 0.
+//
+// The AND that belongs to a BETWEEN is part of that expression, not a
+// connective, so `id BETWEEN 1 AND 5` stays one branch.
 func splitTopLevel(ts []token, word string) [][]token {
 	var (
-		out   [][]token
-		start int
-		depth int
+		out     [][]token
+		start   int
+		depth   int
+		between bool
 	)
 
 	for i := range ts {
@@ -277,6 +346,18 @@ func splitTopLevel(ts []token, word string) [][]token {
 			continue
 		}
 
+		if depth == 0 && isBetweenOperator(ts, i) {
+			between = true
+
+			continue
+		}
+
+		if depth == 0 && between && ts[i].is("and") {
+			between = false
+
+			continue
+		}
+
 		if depth == 0 && ts[i].is(word) {
 			out = append(out, strip(ts[start:i]))
 			start = i + 1
@@ -287,6 +368,29 @@ func splitTopLevel(ts []token, word string) [][]token {
 
 	return out
 }
+
+// isBetweenOperator distinguishes the BETWEEN operator from an identifier
+// spelled `between` (a table alias or column, which some engines allow): an
+// identifier is qualified by a dot, introduced by AS, or sits next to a
+// comparison operator.
+func isBetweenOperator(ts []token, i int) bool {
+	if !ts[i].is("between") {
+		return false
+	}
+
+	if i > 0 && (ts[i-1].is("as") ||
+		(ts[i-1].Type == tPunct && (ts[i-1].Text == "." || comparisonOps[ts[i-1].Text]))) {
+		return false
+	}
+
+	if i+1 < len(ts) && ts[i+1].Type == tPunct && (ts[i+1].Text == "." || comparisonOps[ts[i+1].Text]) {
+		return false
+	}
+
+	return true
+}
+
+var comparisonOps = map[string]bool{"=": true, "<>": true, "!=": true, ">": true, "<": true, ">=": true, "<=": true, "<=>": true}
 
 // branchesAreComplementary reports whether two OR branches together match every
 // row: `x IS NULL` / `x IS NOT NULL`, or `x = v` / `x <> v`.

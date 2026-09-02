@@ -1,0 +1,56 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - cyclop
+    - errorlint
+    - gocognit
+    - gocritic
+    - gosec
+    - misspell
+    - mnd
+    - nilerr
+    - nilnil
+    - nolintlint
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+    - whitespace
+  settings:
+    cyclop:
+      max-complexity: 20
+    gocognit:
+      min-complexity: 30
+    mnd:
+      # Named tables and defaults (rank maps, DefaultPool) are self-describing;
+      # the checks that catch real magic are arguments and conditions.
+      checks: [argument, case, condition, operation]
+      ignored-numbers: ["0", "1", "2"]
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Tests are allowed to be long, repetitive and full of literals.
+      - path: _test\.go
+        linters: [cyclop, gocognit, mnd, gosec, unparam]
+      # Catalog queries are built from constant fragments and bound parameters.
+      - path: internal/database/introspect\.go
+        linters: [gosec]
+        text: "G202"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/rytsh/dbq

@@ -28,6 +28,10 @@ connections:
     source: "postgres://readonly@prod.internal:5432/app"
     description: "production reporting replica, reads only"
     permission: read-only
+    # Only the fields given here differ from the global pool block.
+    pool:
+      max_open: 1
+      max_lifetime: 5m
 
   legacy:
     # Keep a connection profile for later without exposing or checking it.
@@ -48,6 +52,15 @@ connections:
     type: sqlite3
     source: "./scratch.db"
     permission: full
+
+# Connection pool defaults. Zero inherits, a negative value means unlimited.
+# Each connection may override any field under its own pool block; a negative
+# max_idle follows max_open.
+pool:
+  max_open: 3
+  max_idle: 3
+  max_lifetime: 15m
+  max_idle_time: 0
 
 server:
   host: ""

@@ -52,14 +52,23 @@ type dialect struct {
 	NestedBlockComments bool
 	// ExecutableComments makes /*! ... */ bodies real SQL, as on MySQL.
 	ExecutableComments bool
+	// DashCommentNeedsSpace makes -- a comment only when whitespace or the end
+	// of input follows it, as on MySQL, where `1--1` is arithmetic. Without
+	// this rule `SELECT 1--1; DROP TABLE t` reads as a single statement while
+	// the server sees two.
+	DashCommentNeedsSpace bool
 }
 
 // dbq does not know which engine a statement is bound for at classification
 // time — and an ODBC connection could be almost anything — so every statement
 // is read under both profiles and the more dangerous reading wins.
 var (
-	dialectMySQL    = dialect{BackslashEscapes: true, NestedBlockComments: false, ExecutableComments: true}
-	dialectStandard = dialect{BackslashEscapes: false, NestedBlockComments: true, ExecutableComments: false}
+	dialectMySQL = dialect{
+		BackslashEscapes: true, NestedBlockComments: false, ExecutableComments: true, DashCommentNeedsSpace: true,
+	}
+	dialectStandard = dialect{
+		BackslashEscapes: false, NestedBlockComments: true, ExecutableComments: false, DashCommentNeedsSpace: false,
+	}
 )
 
 // lex turns SQL into tokens, discarding comments and literal contents.
@@ -73,7 +82,7 @@ var (
 //   - /* */ including PostgreSQL's nested block comments
 //   - /*! ... */ and /*M! ... */ MySQL executable comments, whose bodies are
 //     real SQL to the server and are therefore lexed inline rather than dropped
-//   - '...' with both '' and backslash escapes
+//   - '...' with both ” and backslash escapes
 //   - "...", `...`, [...] quoted identifiers with doubled-quote escapes
 //   - $$...$$ and $tag$...$tag$ PostgreSQL dollar quoting
 //
@@ -89,13 +98,18 @@ func lex(sql string, d dialect) []token {
 type lexer struct {
 	dialect dialect
 	out     []token
+
+	// trackSemis records the offset past every top-level semicolon, which is
+	// what SplitStatements needs and the classifier does not.
+	trackSemis bool
+	semis      []int
 }
 
 func (l *lexer) emit(t tokenType, text string) {
 	l.out = append(l.out, token{Type: t, Text: text})
 }
 
-//nolint:gocognit,cyclop // A lexer is a dispatch table; splitting it would hide the ordering that matters.
+//nolint:cyclop // A lexer is a dispatch table; splitting it would hide the ordering that matters.
 func (l *lexer) run(src []rune) {
 	for i := 0; i < len(src); {
 		c := src[i]
@@ -106,7 +120,7 @@ func (l *lexer) run(src []rune) {
 		}
 
 		switch {
-		case c == '-' && next == '-':
+		case c == '-' && next == '-' && l.dashComment(src, i):
 			i = skipLine(src, i)
 
 		case c == '#':
@@ -163,6 +177,10 @@ func (l *lexer) run(src []rune) {
 		case c == ';':
 			l.emit(tSemi, ";")
 
+			if l.trackSemis {
+				l.semis = append(l.semis, i+1)
+			}
+
 			i++
 
 		case c >= '0' && c <= '9':
@@ -176,7 +194,7 @@ func (l *lexer) run(src []rune) {
 		case isWordStart(c):
 			i = l.lexWord(src, i)
 
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case isSpace(c):
 			i++
 
 		default:
@@ -195,6 +213,24 @@ func (l *lexer) run(src []rune) {
 			i++
 		}
 	}
+}
+
+// dashComment reports whether the -- at i starts a comment under the dialect.
+func (l *lexer) dashComment(src []rune, i int) bool {
+	if !l.dialect.DashCommentNeedsSpace {
+		return true
+	}
+
+	after := i + 2
+	if after >= len(src) {
+		return true
+	}
+
+	return isSpace(src[after]) || src[after] < ' '
+}
+
+func isSpace(c rune) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 func (l *lexer) lexWord(src []rune, i int) int {

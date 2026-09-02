@@ -1,18 +1,15 @@
 name: Test
 
-on: [push]
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
-  sonarcloud:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Get repository name
-        run: echo "REPOSITORY_NAME=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
-
       - uses: actions/checkout@v7
-        with:
-          # Full history improves SonarQube analysis and is needed by --new-from-rev.
-          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -26,9 +23,40 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          args: --timeout=5m --new-from-rev=HEAD~1 --issues-exit-code=0
+          args: --timeout=5m
 
       - name: Run tests
+        run: go test -race -cover ./...
+
+  sonarcloud:
+    # Coverage reporting needs the SonarCloud token, which pull requests from
+    # forks do not receive; the lint and test job above is the gate for those.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repository name
+        run: echo "REPOSITORY_NAME=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          # Full history improves SonarQube analysis.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends unixodbc-dev
+
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=5m --issues-exit-code=0
+
+      - name: Collect reports
         run: |
           golangci-lint run --output.checkstyle.path=golangci-lint-report.out --issues-exit-code=0 ./...
           go test -coverprofile=coverage.out -json ./... > test-report.out

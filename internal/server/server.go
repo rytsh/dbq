@@ -135,21 +135,21 @@ func (s *Server) live(c *ada.Context) error {
 
 // health pings every connection. A single unreachable database degrades the
 // response to 503 but the body still reports each connection individually so
-// the failing one is identifiable.
+// the failing one is identifiable. Each ping is bounded by the connection
+// check timeout so a hung database cannot hang the probe.
 func (s *Server) health(c *ada.Context) error {
-	ctx := c.Request.Context()
 	statuses := map[string]string{}
 	healthy := true
 
-	for _, info := range s.svc.Connections(service.FullScope) {
-		if err := s.svc.Ping(ctx, service.FullScope, info.Name); err != nil {
-			statuses[info.Name] = "error: " + err.Error()
+	for name, err := range s.svc.Health(c.Request.Context(), s.cfg.Server.ConnectionCheckTimeout) {
+		if err != nil {
+			statuses[name] = "error: " + err.Error()
 			healthy = false
 
 			continue
 		}
 
-		statuses[info.Name] = "ok"
+		statuses[name] = "ok"
 	}
 
 	status := "ok"

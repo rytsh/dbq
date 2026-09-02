@@ -1,3 +1,5 @@
+// Command dbq runs SQL against configured databases from the terminal or as
+// an HTTP/MCP server.
 package main
 
 import (

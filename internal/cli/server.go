@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
+	"slices"
 
 	"github.com/spf13/cobra"
 
@@ -55,7 +57,7 @@ func runServer(cmd *cobra.Command, global *globalFlags, local *serverFlags, buil
 	if err != nil {
 		return err
 	}
-	defer svc.Manager().Close() //nolint:errcheck // shutdown path
+	defer svc.Manager().Close()
 
 	if err := checkConnections(ctx, cfg, svc); err != nil {
 		return err
@@ -85,21 +87,16 @@ func runServer(cmd *cobra.Command, global *globalFlags, local *serverFlags, buil
 func checkConnections(ctx context.Context, cfg *config.Config, svc *service.Service) error {
 	var errs []error
 
-	for _, info := range svc.Connections(service.FullScope) {
-		checkCtx := ctx
-		cancel := func() {}
-		if cfg.Server.ConnectionCheckTimeout > 0 {
-			checkCtx, cancel = context.WithTimeout(ctx, cfg.Server.ConnectionCheckTimeout)
-		}
+	statuses := svc.Health(ctx, cfg.Server.ConnectionCheckTimeout)
 
-		err := svc.Ping(checkCtx, service.FullScope, info.Name)
-		cancel()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", info.Name, err))
+	for _, name := range slices.Sorted(maps.Keys(statuses)) {
+		if err := statuses[name]; err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+
 			continue
 		}
 
-		slog.Info("database connection check succeeded", "connection", info.Name)
+		slog.Info("database connection check succeeded", "connection", name)
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -122,7 +119,7 @@ func newConnectionsCommand(global *globalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer svc.Manager().Close() //nolint:errcheck // shutdown path
+			defer svc.Manager().Close()
 
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")

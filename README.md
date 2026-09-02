@@ -43,8 +43,28 @@ dbq --source 'postgres://user:urlencodedpassword@localhost:5432/postgres?applica
 +---+---+
 ```
 
-Statements are terminated with `;`. Use `-n` to strip the `;` before it reaches
-the driver, and `--ping` to just verify the connection and exit.
+Statements are terminated with `;` and may span lines; a `;` inside a string
+literal or a comment does not end a statement. Use `-n` to strip the `;` before
+it reaches the driver, and `--ping` to just verify the connection and exit.
+
+Scripts and one-liners work the same way. Statements can come from `-e`, from a
+file with `-f`, or from a pipe, and the output format is selectable:
+
+```sh
+dbq -c prod -e 'select count(*) as n from orders' -o json
+dbq -c prod -f report.sql -o csv > report.csv
+cat migrate.sql | dbq -c local
+```
+
+| `-o`    | Output                                                   |
+| ------- | -------------------------------------------------------- |
+| `table` | ASCII table, the default                                 |
+| `json`  | one array of row objects per statement; a repeated column name such as a second `id` becomes `id_2` |
+| `csv`   | header line plus one line per row                        |
+
+When statements come from anything other than a terminal, the first failing
+statement stops the run and `dbq` exits non-zero. Truncation notices for
+`json` and `csv` go to stderr so stdout stays parseable.
 
 ## Configuration
 
@@ -67,6 +87,8 @@ connections:
     source: "postgres://readonly:pass@prod.internal:5432/app"
     description: "production, reporting replica"
     permission: read-only
+    pool:
+      max_open: 1 # overrides the global pool block, field by field
 
   bas:
     disabled: true # retained in config but not exposed or checked
@@ -75,6 +97,11 @@ connections:
     source: "DSN=bas"
     description: "Ingres BAS database"
     permission: read-only
+
+pool:
+  max_open: 3
+  max_idle: 3
+  max_lifetime: 15m
 
 server:
   host: ""
@@ -97,6 +124,13 @@ Put secrets in the environment rather than the file:
 ```sh
 export DBQ_CONNECTIONS_PROD_SOURCE='postgres://readonly:...@prod.internal:5432/app'
 ```
+
+The `pool` block sets `max_open`, `max_idle`, `max_lifetime` and
+`max_idle_time` for every connection; a connection's own `pool` block overrides
+any of them. Zero inherits and a negative value means unlimited (`max_idle`
+cannot be unlimited, so a negative value there follows `max_open`). The defaults
+are deliberately small: an agent issues queries faster than a person, and dbq
+is rarely the only client of a database.
 
 Check what was loaded:
 
@@ -121,19 +155,24 @@ WHERE id = 1` is safe-write; `DELETE FROM users` and `DELETE FROM users WHERE
 1=1` are `full`, because "safe-write" should not mean "may empty any table".
 
 A write is treated as unbounded when it has no `WHERE`, when the predicate
-cannot narrow anything (`WHERE TRUE`, `WHERE 1=1`, `WHERE id = id`, `WHERE name
-LIKE '%'`, `WHERE id = 1 OR id <> 1`, a predicate naming no column at all), when
-it spans joined tables, when it contains a subquery, or when it is an
-`INSERT ... SELECT`, an upsert, or a `MERGE`.
+cannot narrow anything (`WHERE TRUE`, `WHERE 1=1`, `WHERE id = id`, `WHERE NOT
+id <> id`, `WHERE id BETWEEN id AND id`, `WHERE name LIKE '%'`, `WHERE id = 1 OR
+id <> 1`, `NOT (id = 1 AND 1 = 2)`, a predicate naming no column at all), when it spans joined tables,
+when it contains a subquery, or when it is an `INSERT ... SELECT` in any of its
+spellings (`INSERT INTO t (SELECT ...)`, `INSERT INTO t TABLE src`), an upsert,
+or a `MERGE`.
 
 Some statements are refused at **every** level:
 
 - **Batches.** `SELECT 1; DROP TABLE users` is rejected. Classifying only the
   first verb would let the rest through, and whether it executes would then
   depend on driver settings — not something a security boundary may rest on.
-- **Connection-state statements** (`BEGIN`, `COMMIT`, `USE`, `SET`, `LOCK`).
-  dbq runs each statement on a pooled connection, so the change would leak into
-  an unrelated caller's next query.
+- **Connection-state statements** (`BEGIN`, `COMMIT`, `USE`, `SET`, `LOCK`),
+  and SQLite `PRAGMA` assignments such as `PRAGMA journal_mode = WAL`. dbq runs
+  each statement on a pooled connection, so the change would leak into an
+  unrelated caller's next query. `PRAGMA table_info(t)`, `PRAGMA journal_mode`
+  and the other query-only pragmas remain reads; maintenance pragmas such as
+  `PRAGMA wal_checkpoint` or `PRAGMA optimize` need `full`.
 
 ### How the classifier reads SQL
 
@@ -146,7 +185,10 @@ hidden inside data cannot be read as code.
 Because the same bytes lex differently per engine, every statement is read under
 **both** a MySQL-style and a standard-SQL dialect and the more dangerous reading
 wins. `SELECT 'a\'; DROP TABLE users; --'` is one string literal to MySQL and
-two statements to PostgreSQL, so dbq treats it as a batch and refuses it.
+two statements to PostgreSQL, so dbq treats it as a batch and refuses it. The
+reverse holds too: MySQL only treats `--` as a comment when whitespace follows,
+so `SELECT 1--1; DROP TABLE users` is arithmetic and a second statement there,
+and dbq refuses it as a batch.
 
 It also catches statements that look like reads but are not: `SELECT ... FOR
 UPDATE` (takes row locks), `SELECT ... INTO OUTFILE` (writes to the server's
@@ -156,6 +198,13 @@ and writable CTEs such as
 
 Anything it cannot classify requires `full`. It fails closed.
 
+What it cannot see is what a function does. `SELECT pg_read_file(...)`,
+`SELECT lo_import(...)` or `SELECT pg_advisory_lock(1)` are reads to a lexer,
+and the last one leaves a lock on a pooled connection. The classifier is a
+guard against an agent's mistakes, not a substitute for database privileges:
+give each connection a database role that can only do what its dbq permission
+level promises.
+
 ## Server
 
 ```sh
@@ -164,10 +213,10 @@ dbq server
 
 ### HTTP probes
 
-| Method | Path                                |
-| ------ | ----------------------------------- |
-| GET    | `/healthz` — pings every connection |
-| GET    | `/livez`                            |
+| Method | Path                                                                 |
+| ------ | -------------------------------------------------------------------- |
+| GET    | `/healthz` — pings every connection concurrently, each bounded by `server.connection_check_timeout`; 503 with per-connection detail when one fails |
+| GET    | `/livez`                                                             |
 
 Database discovery and queries are exposed only through MCP.
 
@@ -258,7 +307,8 @@ model's context:
 The row cap alone is not enough: one `TEXT` column can hold megabytes, so
 `SELECT * FROM documents` would blow the window even at a small row limit. The
 timeout is what stops an agent-issued cartesian join from pinning a connection
-until the client gives up.
+until the client gives up. A tool call may pass `max_rows` or `max_chars` to
+ask for less; it can never raise either above the configured cap.
 
 ## Docker
 
@@ -286,4 +336,5 @@ sudo apt-get install -y unixodbc-dev
 
 make build
 make test
+make lint   # golangci-lint, configured in .golangci.yml; CI fails on findings
 ```

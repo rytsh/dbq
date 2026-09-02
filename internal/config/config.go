@@ -1,3 +1,4 @@
+// Package config loads dbq's configuration from file and environment.
 package config
 
 import (
@@ -33,8 +34,36 @@ type Config struct {
 	// Connections are the named connection profiles, keyed by name.
 	Connections map[string]Connection `cfg:"connections"`
 
+	// Pool is the default pool configuration for every connection. A
+	// connection's own pool block overrides it field by field.
+	Pool Pool `cfg:"pool"`
+
 	Server Server `cfg:"server"`
 	MCP    MCP    `cfg:"mcp"`
+}
+
+// Pool tunes the database/sql pool behind a connection.
+//
+// Zero means "inherit" (from the global pool, then from dbq's defaults); a
+// negative value means unlimited.
+type Pool struct {
+	// MaxOpen caps open connections, idle or in use.
+	MaxOpen int `cfg:"max_open"`
+	// MaxIdle caps idle connections kept for reuse.
+	MaxIdle int `cfg:"max_idle"`
+	// MaxLifetime retires a connection after this long.
+	MaxLifetime time.Duration `cfg:"max_lifetime"`
+	// MaxIdleTime closes a connection idle for this long.
+	MaxIdleTime time.Duration `cfg:"max_idle_time"`
+}
+
+func (p Pool) toDatabase() database.PoolConfig {
+	return database.PoolConfig{
+		MaxOpen:     p.MaxOpen,
+		MaxIdle:     p.MaxIdle,
+		MaxLifetime: p.MaxLifetime,
+		MaxIdleTime: p.MaxIdleTime,
+	}
 }
 
 // Connection is one named database profile.
@@ -54,6 +83,8 @@ type Connection struct {
 	// Permission caps what may be run against this connection:
 	// read-only, safe-write or full. Defaults to read-only.
 	Permission string `cfg:"permission"`
+	// Pool overrides the global pool settings for this connection only.
+	Pool Pool `cfg:"pool"`
 }
 
 // Server holds the HTTP listener settings.
@@ -223,6 +254,7 @@ func (c *Config) ConnectionDefs() ([]database.ConnectionDef, error) {
 			Source:      conn.Source,
 			Description: conn.Description,
 			Permission:  perm,
+			Pool:        conn.Pool.toDatabase().Merged(c.Pool.toDatabase()),
 		})
 	}
 

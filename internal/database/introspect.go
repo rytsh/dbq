@@ -101,6 +101,28 @@ func foreignKeyQuery(driver, schema, table string) (string, []any) {
 
 		return q, args
 
+	case "sqlserver":
+		// SQL Server's information_schema.key_column_usage lacks
+		// position_in_unique_constraint, so the generic query below fails
+		// there; the sys catalog carries the column pairing directly.
+		q := `SELECT pc.name, rt.name, rc.name
+			FROM sys.foreign_key_columns fkc
+			JOIN sys.tables pt ON pt.object_id = fkc.parent_object_id
+			JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+			JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
+			JOIN sys.tables rt ON rt.object_id = fkc.referenced_object_id
+			JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+			WHERE pt.name = ?`
+
+		args := []any{table}
+		if schema != "" {
+			q += ` AND ps.name = ?`
+
+			args = append(args, schema)
+		}
+
+		return q + ` ORDER BY fkc.constraint_column_id`, args
+
 	case "ingres":
 		// Ingres predates information_schema and exposes constraints through
 		// vendor catalogs. Foreign-key discovery can be added independently.

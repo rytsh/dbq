@@ -118,18 +118,25 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	b.WriteString("Rules:\n")
 	b.WriteString("- Never invent table or column names. Inspect the schema first.\n")
 	b.WriteString("- " + ToolPrefix + "query only runs read statements. Use " + ToolPrefix + "execute for INSERT/UPDATE/DELETE/DDL.\n")
-	fmt.Fprintf(&b, "- Results are capped at %d rows. Use LIMIT and aggregates instead of pulling whole tables; ", maxRows)
+	if maxRows > 0 {
+		fmt.Fprintf(&b, "- Results are capped at %d rows. ", maxRows)
+	} else {
+		b.WriteString("- Results are not capped by the server. ")
+	}
+
+	b.WriteString("Use LIMIT and aggregates instead of pulling whole tables; ")
 	b.WriteString("if truncated is true you are seeing a partial result, not the full answer.\n")
 	b.WriteString("- Long text values are shortened. If cells_truncated is non-zero, the values shown are prefixes; ")
 	b.WriteString("narrow the query to the row and column you need rather than raising the limit blindly.\n")
 	b.WriteString("- Send exactly one statement per call. Statements separated by semicolons are refused.\n")
 	b.WriteString("- Write SQL in the dialect of the connection's type (pgx = PostgreSQL, sqlite3 = SQLite, ")
 	b.WriteString("sqlserver = SQL Server, godror = Oracle, odbc = the ODBC target).\n")
-	b.WriteString("- Each connection has a permission level. read-only rejects every write, safe-write allows ")
-	b.WriteString("DML but not DDL, full allows everything. A rejected statement is a policy decision, not a bug: ")
-	b.WriteString("do not try to work around it.\n")
-	b.WriteString("- Always scope UPDATE and DELETE with a specific WHERE clause. Never rely on WHERE 1=1.\n")
-	b.WriteString("- Send one statement per call.\n\n")
+	b.WriteString("- Each connection has a permission level. read-only rejects every write. safe-write allows ")
+	b.WriteString("only writes with a bounded reach: INSERT ... VALUES, and UPDATE or DELETE on a single table ")
+	b.WriteString("with a WHERE clause that selects specific rows. Writes without an effective WHERE clause, ")
+	b.WriteString("INSERT ... SELECT, upserts, MERGE, joined writes and subqueries in WHERE need full, as does DDL. ")
+	b.WriteString("A rejected statement is a policy decision, not a bug: do not try to work around it.\n")
+	b.WriteString("- Always scope UPDATE and DELETE with a specific WHERE clause. Never rely on WHERE 1=1.\n\n")
 
 	if !svc.CanWrite(opts.Scope) {
 		b.WriteString("- This endpoint is read-only: no write tool is available. ")
@@ -189,8 +196,8 @@ type schemaContextInput struct {
 type queryInput struct {
 	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL        string `json:"sql" jsonschema:"exactly one read-only SQL statement (SELECT, SHOW, EXPLAIN, or WITH ... SELECT) in the connection's dialect; do not send several statements separated by semicolons"`
-	MaxRows    int    `json:"max_rows,omitempty" jsonschema:"rows to return; the server's own cap still applies and cannot be exceeded"`
-	MaxChars   int    `json:"max_chars,omitempty" jsonschema:"characters to keep per text value before it is shortened; raise only when you specifically need a long value, and narrow the query to that row and column first"`
+	MaxRows    int    `json:"max_rows,omitempty" jsonschema:"rows to return; may be lower than the server's cap, never higher"`
+	MaxChars   int    `json:"max_chars,omitempty" jsonschema:"characters to keep per text value before it is shortened; may be lower than the server's cap, never higher, so narrow the query to the row and column you need instead of asking for more"`
 }
 
 type executeInput struct {
@@ -348,8 +355,10 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 		},
 		Description: "Run one data-modifying or schema-modifying SQL statement and return the number " +
 			"of affected rows. The statement is refused unless the connection's permission level " +
-			"allows it: read-only refuses everything, safe-write allows INSERT/UPDATE/DELETE, full " +
-			"also allows DDL. Always scope UPDATE and DELETE with a specific WHERE clause, and " +
+			"allows it: read-only refuses everything; safe-write allows INSERT ... VALUES and " +
+			"single-table UPDATE/DELETE with a WHERE clause that selects specific rows; full is " +
+			"needed for DDL, writes without an effective WHERE, INSERT ... SELECT, upserts, MERGE " +
+			"and joined writes. Always scope UPDATE and DELETE with a specific WHERE clause, and " +
 			"confirm the intent with the user before running anything destructive.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in executeInput) (*mcp.CallToolResult, queryOutput, error) {
 		res, err := svc.Execute(ctx, scope, service.ExecuteRequest{

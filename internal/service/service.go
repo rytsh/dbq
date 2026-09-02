@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rytsh/dbq/internal/database"
@@ -377,19 +378,74 @@ func (s *Service) Execute(ctx context.Context, scope Scope, req ExecuteRequest) 
 		return nil, err
 	}
 
-	maxRows := req.MaxRows
-	if maxRows == 0 {
-		maxRows = scope.MaxRows
-	}
-
-	maxCellChars := req.MaxCellChars
-	if maxCellChars == 0 {
-		maxCellChars = scope.MaxCellChars
-	}
-
 	return database.Execute(ctx, db, req.SQL, database.QueryOptions{
-		MaxRows:      maxRows,
-		MaxCellChars: maxCellChars,
+		MaxRows:      cappedLimit(req.MaxRows, scope.MaxRows, database.DefaultMaxRows),
+		MaxCellChars: cappedLimit(req.MaxCellChars, scope.MaxCellChars, database.DefaultMaxCellChars),
 		Timeout:      scope.Timeout,
 	})
+}
+
+// cappedLimit combines a caller's requested limit with the scope's ceiling.
+//
+// The scope is the operator's decision and always wins: a request may lower
+// the limit but never raise it, and a negative request (meaning "unlimited")
+// only takes effect when the scope itself is unlimited. Zero on either side
+// means "use the default".
+func cappedLimit(requested, ceiling, fallback int) int {
+	if ceiling == 0 {
+		ceiling = fallback
+	}
+
+	if ceiling < 0 {
+		// The scope imposes no cap; the request decides, and an omitted
+		// request inherits the scope's "unlimited".
+		if requested == 0 {
+			return ceiling
+		}
+
+		return requested
+	}
+
+	if requested <= 0 || requested > ceiling {
+		return ceiling
+	}
+
+	return requested
+}
+
+// Health pings every connection concurrently, each under its own timeout, and
+// reports the outcome per connection. Concurrency matters because one hung
+// database must not delay the report on the others, and the timeout is what
+// stops it from hanging the probe altogether. Zero timeout means none.
+func (s *Service) Health(ctx context.Context, timeout time.Duration) map[string]error {
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		statuses = map[string]error{}
+	)
+
+	for _, info := range s.Connections(FullScope) {
+		wg.Add(1)
+
+		go func(name string) {
+			defer wg.Done()
+
+			pingCtx := ctx
+			cancel := func() {}
+			if timeout > 0 {
+				pingCtx, cancel = context.WithTimeout(ctx, timeout)
+			}
+			defer cancel()
+
+			err := s.Ping(pingCtx, FullScope, name)
+
+			mu.Lock()
+			statuses[name] = err
+			mu.Unlock()
+		}(info.Name)
+	}
+
+	wg.Wait()
+
+	return statuses
 }
