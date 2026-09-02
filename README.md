@@ -1,5 +1,10 @@
 # dbq
 
+[![License](https://img.shields.io/github/license/rytsh/dbq?color=red&style=flat-square)](https://raw.githubusercontent.com/rytsh/dbq/main/LICENSE)
+[![Coverage](https://img.shields.io/sonar/coverage/rytsh_dbq?logo=sonarcloud&server=https%3A%2F%2Fsonarcloud.io&style=flat-square)](https://sonarcloud.io/summary/overall?id=rytsh_dbq)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/rytsh/dbq/test.yml?branch=main&logo=github&style=flat-square&label=ci)](https://github.com/rytsh/dbq/actions)
+[![Go PKG](https://raw.githubusercontent.com/rakunlabs/.github/main/assets/badges/gopkg.svg)](https://pkg.go.dev/github.com/rytsh/dbq)
+
 Run SQL against databases from the terminal or from an AI agent.
 
 `dbq` is three things over one core:
