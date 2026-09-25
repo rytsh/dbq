@@ -20,8 +20,7 @@ Supported drivers: `pgx` (PostgreSQL), `sqlite3`, `sqlserver`, `godror` (Oracle)
 ## Install
 
 ```sh
-curl -fSL https://github.com/rytsh/dbq/releases/latest/download/dbq_Linux_x86_64.tar.gz \
-  | tar -xz --overwrite -C ~/bin/ dbq
+curl -fSL https://github.com/rytsh/dbq/releases/latest/download/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
 ```
 
 Or pull the container image, `ghcr.io/rytsh/dbq`.
@@ -213,7 +212,91 @@ What it cannot see is what a function does. `SELECT pg_read_file(...)`,
 and the last one leaves a lock on a pooled connection. The classifier is a
 guard against an agent's mistakes, not a substitute for database privileges:
 give each connection a database role that can only do what its dbq permission
-level promises.
+level promises. See [Database-side read-only](#database-side-read-only).
+
+### Database-side read-only
+
+> [!WARNING]
+> `permission: read-only` is enforced by dbq, not by the database. The
+> database only refuses what the connection's user is not allowed to do. For
+> any database that matters, connect a `read-only` connection with a user that
+> can only read, or point it at a read replica.
+
+Some statements pass the classifier as reads but still change something:
+
+| Database   | Example                                                                                  |
+| ---------- | ---------------------------------------------------------------------------------------- |
+| PostgreSQL | `SELECT nextval('seq')`, `SELECT set_config(...)`, `SELECT pg_terminate_backend(pid)`, a user-defined function that writes |
+| Oracle     | `SELECT f() FROM dual` where `f` writes and commits in an autonomous transaction          |
+| SQL Server | a scalar or CLR function with side effects called from a `SELECT`                       |
+
+Only database privileges stop these. Use the strongest option available, from
+most to least effective:
+
+1. **A read replica.** It refuses writes no matter who connects.
+2. **A user that can only read.** Examples are below.
+3. **A read-only setting in the DSN.** Use this as a second layer, not instead
+   of 2.
+
+Match the user to the dbq level. A `read-only` connection gets `SELECT` only.
+A `safe-write` connection gets `SELECT`, `INSERT`, `UPDATE` and `DELETE` on the
+tables it needs, and no DDL. Only `full` should have DDL or ownership rights.
+Never connect dbq as a superuser, `db_owner`, `DBA` or the schema owner.
+
+**PostgreSQL**
+
+```sql
+CREATE ROLE dbq_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE app TO dbq_ro;
+GRANT USAGE ON SCHEMA public TO dbq_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO dbq_ro;
+-- Tables that app_owner (the role that creates your tables) adds later are readable too.
+ALTER DEFAULT PRIVILEGES FOR ROLE app_owner IN SCHEMA public
+  GRANT SELECT ON TABLES TO dbq_ro;
+-- Every transaction this user starts is read-only by default.
+ALTER ROLE dbq_ro SET default_transaction_read_only = on;
+-- PostgreSQL 14 and earlier let every user create tables in public.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+```
+
+On PostgreSQL 14+, `GRANT pg_read_all_data TO dbq_ro` gives read access to
+every schema at once. Do not grant `pg_read_server_files`,
+`pg_execute_server_program` or `pg_signal_backend`.
+
+**SQL Server**
+
+```sql
+CREATE LOGIN dbq_ro WITH PASSWORD = '...';
+USE app;
+CREATE USER dbq_ro FOR LOGIN dbq_ro;
+ALTER ROLE db_datareader ADD MEMBER dbq_ro;
+-- Optional: also block stored procedures and functions.
+DENY EXECUTE TO dbq_ro;
+```
+
+**Oracle**
+
+```sql
+CREATE USER dbq_ro IDENTIFIED BY "...";
+GRANT CREATE SESSION TO dbq_ro;
+GRANT SELECT ON app.users TO dbq_ro;  -- per table, or:
+GRANT READ ANY TABLE TO dbq_ro;        -- 12c+; unlike SELECT ANY TABLE it cannot lock rows
+```
+
+**ODBC targets (e.g. Ingres):** create a user that has only `SELECT` on the
+tables dbq should see.
+
+**Read-only settings in the DSN:**
+
+| Driver      | DSN                                                     | Notes |
+| ----------- | ------------------------------------------------------- | ----- |
+| `pgx`       | `postgres://dbq_ro@host/app?default_transaction_read_only=on` | Can be turned off with `SELECT set_config(...)`, so use it together with a read-only user. |
+| `sqlite3`   | `file:./app.db?mode=ro`                                 | SQLite has no users. `mode=ro` opens the file read-only. Also make the file read-only for the dbq process's OS user. |
+| `sqlserver` | none                                                    | `ApplicationIntent=ReadOnly` only routes to an Always On secondary. It does not block writes. |
+| `godror`    | none                                                    | Use a read-only user. |
+
+A `read-only` connection whose user can write still works, but its safety then
+depends entirely on the classifier.
 
 ## Server
 

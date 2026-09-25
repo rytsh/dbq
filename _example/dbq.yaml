@@ -12,6 +12,10 @@
 #
 # Keep DSNs out of this file in anything but local development; the source field
 # is masked in logs but the file itself is not a secret store.
+#
+# permission is enforced by dbq, not by the database. Connect every read-only
+# connection with a database user that can only read, or point it at a read
+# replica. See "Database-side read-only" in the README.
 
 log_level: info
 
@@ -25,7 +29,8 @@ connections:
 
   prod:
     type: pgx
-    source: "postgres://readonly@prod.internal:5432/app"
+    # dbq_ro has SELECT only, on a read replica.
+    source: "postgres://dbq_ro@prod-replica.internal:5432/app?default_transaction_read_only=on"
     description: "production reporting replica, reads only"
     permission: read-only
     # Only the fields given here differ from the global pool block.
