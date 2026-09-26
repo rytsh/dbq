@@ -69,6 +69,46 @@ func TestLoadConfigFileSearchOrder(t *testing.T) {
 	}
 }
 
+func TestServerHostDefaultAndEnvironmentOverride(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CONFIG_FILE", "")
+	t.Setenv("CONFIG_FILE_DBQ", "")
+
+	oldHost, hostWasSet := os.LookupEnv("DBQ_SERVER_HOST")
+	if err := os.Unsetenv("DBQ_SERVER_HOST"); err != nil {
+		t.Fatalf("unset server host: %v", err)
+	}
+	t.Cleanup(func() {
+		if hostWasSet {
+			_ = os.Setenv("DBQ_SERVER_HOST", oldHost)
+
+			return
+		}
+		_ = os.Unsetenv("DBQ_SERVER_HOST")
+	})
+
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	if cfg.Server.Host != "127.0.0.1" {
+		t.Fatalf("default server host = %q, want 127.0.0.1", cfg.Server.Host)
+	}
+
+	if err := os.Setenv("DBQ_SERVER_HOST", "0.0.0.0"); err != nil {
+		t.Fatalf("set server host: %v", err)
+	}
+	cfg, err = Load(context.Background())
+	if err != nil {
+		t.Fatalf("load environment override: %v", err)
+	}
+	if cfg.Server.Host != "0.0.0.0" {
+		t.Fatalf("environment server host = %q, want 0.0.0.0", cfg.Server.Host)
+	}
+}
+
 func TestConnectionDefsSkipsDisabled(t *testing.T) {
 	cfg := &Config{Connections: map[string]Connection{
 		"enabled": {

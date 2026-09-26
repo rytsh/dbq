@@ -124,7 +124,7 @@ pool:
   max_lifetime: 15m
 
 server:
-  host: "0.0.0.0" # protect remote access with authentication/network policy
+  host: "127.0.0.1" # default; use 0.0.0.0 only with authentication/network policy
   port: "8080"
   connection_check_timeout: 10s
 
@@ -336,7 +336,7 @@ Database discovery and queries are exposed only through MCP.
 
 ## MCP server
 
-`dbq` mounts the configured MCP paths. Each path has a permission ceiling and
+`dbq server` mounts the configured MCP paths. Each path has a permission ceiling and
 an optional connection allowlist. With no explicit endpoint configuration,
 `/mcp` is mounted with a `read-only` ceiling. Write access must be configured
 explicitly.
@@ -345,8 +345,10 @@ explicitly.
 separate paths such as `/mcp` and `/mcp/reporting` can receive different
 policies upstream. When export is enabled, protect `/exports` with the same
 upstream policy. Export IDs are short-lived capabilities, not a replacement for
-transport authentication. dbq listens on all interfaces by default, so remote
-access must be protected by an upstream authentication and network policy.
+transport authentication. dbq listens on `127.0.0.1` by default. Set
+`server.host: 0.0.0.0` only when remote access is protected by upstream
+authentication and network policy. The published Docker image makes this
+override automatically through `DBQ_SERVER_HOST=0.0.0.0`.
 
 The ceiling only ever *restricts*. A connection configured as `read-only` stays
 read-only even on a `full` endpoint; the effective permission is the lower of
@@ -367,6 +369,60 @@ found`. Set `mcp.stateless: false` only if a client requires the session
 handshake.
 
 ### Client config
+
+For a local client, stdio avoids opening a network port and keeps one dbq
+process alive for the MCP connection:
+
+```json
+{
+  "mcpServers": {
+    "dbq": {
+      "type": "stdio",
+      "command": "dbq",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The stdio command uses the `/mcp` endpoint's permission ceiling and connection
+allowlist by default. Select another configured policy with
+`dbq mcp --endpoint /mcp/reporting`. Bulk exports are HTTP-only and are not
+advertised over stdio because there is no download route.
+
+If the host does not have dbq's native database libraries, run the stdio server
+through Docker instead. Keep stdin attached with `-i` and do not allocate a TTY:
+
+```sh
+docker run --rm -i \
+  -v "$HOME/.config/dbq/dbq.yaml:/etc/dbq.yaml:ro" \
+  ghcr.io/rytsh/dbq:latest mcp
+```
+
+An MCP client can launch that container directly. Use an absolute host path in
+the volume argument because clients do not necessarily expand `$HOME`:
+
+```json
+{
+  "mcpServers": {
+    "dbq": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "/absolute/path/to/dbq.yaml:/etc/dbq.yaml:ro",
+        "ghcr.io/rytsh/dbq:latest", "mcp"
+      ]
+    }
+  }
+}
+```
+
+From a container, `localhost` refers to the container itself. On Docker Desktop,
+use `host.docker.internal` in a database DSN to reach a database on the host. On
+Linux, either use the host's reachable address or add `--network host`.
+
+For a remote or long-running service, use Streamable HTTP:
 
 ```json
 {

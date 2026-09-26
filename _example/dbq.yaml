@@ -68,8 +68,8 @@ pool:
   max_idle_time: 0
 
 server:
-  # Protect remote access with authentication and an explicit network policy.
-  host: "0.0.0.0"
+  # Defaults to loopback. Use 0.0.0.0 only with authentication/network policy.
+  host: "127.0.0.1"
   port: "8080"
   shutdown_timeout: 10s
   # Enabled connections must pass a ping before the server starts.

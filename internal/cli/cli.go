@@ -44,7 +44,7 @@ func NewRootCommand(build BuildInfo) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "dbq",
 		Short:         "database query tool",
-		Long:          "dbq runs SQL against configured databases, interactively or as an HTTP/MCP server",
+		Long:          "dbq runs SQL against configured databases, interactively or as an HTTP or stdio MCP server",
 		Version:       build.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -65,6 +65,7 @@ func NewRootCommand(build BuildInfo) *cobra.Command {
 
 	addREPLCommand(root, flags)
 	root.AddCommand(newServerCommand(flags, build))
+	root.AddCommand(newMCPCommand(flags, build))
 	root.AddCommand(newConnectionsCommand(flags))
 
 	return root

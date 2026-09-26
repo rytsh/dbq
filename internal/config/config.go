@@ -102,7 +102,7 @@ type Connection struct {
 
 // Server holds the HTTP listener settings.
 type Server struct {
-	Host                   string        `cfg:"host" default:"0.0.0.0"`
+	Host                   string        `cfg:"host" default:"127.0.0.1"`
 	Port                   string        `cfg:"port" default:"8080"`
 	ShutdownTimeout        time.Duration `cfg:"shutdown_timeout" default:"10s"`
 	ConnectionCheckTimeout time.Duration `cfg:"connection_check_timeout" default:"10s"`

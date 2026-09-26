@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 
 COPY dbq /usr/local/bin/dbq
 
+ENV DBQ_SERVER_HOST=0.0.0.0
+
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/dbq"]
