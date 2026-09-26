@@ -13,8 +13,5 @@ COPY dbq /usr/local/bin/dbq
 
 EXPOSE 8080
 
-# An empty entrypoint with bash as the default command keeps the image usable as
-# a database client shell (`docker run <img>`) while still allowing the server to
-# be started directly (`docker run <img> dbq server`).
-ENTRYPOINT []
-CMD ["/bin/bash"]
+ENTRYPOINT ["/usr/local/bin/dbq"]
+CMD ["server"]

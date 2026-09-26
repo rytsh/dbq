@@ -17,13 +17,13 @@ import (
 	"github.com/rakunlabs/chu/loader/loaderfile"
 	"github.com/rakunlabs/logi"
 
-	_ "github.com/rakunlabs/chu/loader/external/loaderawssecrets"
-	_ "github.com/rakunlabs/chu/loader/external/loaderawsssm"
-	_ "github.com/rakunlabs/chu/loader/external/loaderazurekeyvault"
-	_ "github.com/rakunlabs/chu/loader/external/loaderconsul"
-	_ "github.com/rakunlabs/chu/loader/external/loadergcpparameter"
-	_ "github.com/rakunlabs/chu/loader/external/loadergcpsecret"
-	_ "github.com/rakunlabs/chu/loader/external/loadervault"
+	_ "github.com/rakunlabs/chu/loader/external/loaderawssecrets"    // Register the AWS Secrets Manager loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loaderawsssm"        // Register the AWS Systems Manager loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loaderazurekeyvault" // Register the Azure Key Vault loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loaderconsul"        // Register the Consul loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loadergcpparameter"  // Register the GCP Parameter Manager loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loadergcpsecret"     // Register the GCP Secret Manager loader through init.
+	_ "github.com/rakunlabs/chu/loader/external/loadervault"         // Register the Vault loader through init.
 
 	"github.com/rytsh/dbq/internal/database"
 )

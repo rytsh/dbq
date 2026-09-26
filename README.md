@@ -17,13 +17,26 @@ Run SQL against databases from the terminal or from an AI agent.
 Supported drivers: `pgx` (PostgreSQL), `sqlite3`, `sqlserver`, `godror` (Oracle),
 `odbc`.
 
+## Run with Docker
+
+Create `~/.config/dbq/dbq.yaml`, then run dbq as a background service that
+starts again automatically after a reboot or failure:
+
+```sh
+# change port number and config file path as needed
+docker run -d --name dbq --restart unless-stopped -p 8080:8080 -v "$HOME/.config/dbq/dbq.yaml:/etc/dbq.yaml:ro" ghcr.io/rytsh/dbq:latest
+```
+
+The HTTP server, health probes, and MCP endpoint are then available on port
+`8080` (for example, `http://localhost:8080/mcp`).
+
 ## Install
+
+Check the [releases page](https://github.com/rytsh/dbq/releases/latest)
 
 ```sh
 curl -fSL https://github.com/rytsh/dbq/releases/latest/download/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
 ```
-
-Or pull the container image, `ghcr.io/rytsh/dbq`.
 
 ## Quick start
 
@@ -447,12 +460,14 @@ ask for less; it can never raise either above the configured cap.
 ## Docker
 
 ```sh
-# database client shell
-docker run -it --rm ghcr.io/rytsh/dbq:latest
+# database client
+docker run -it --rm ghcr.io/rytsh/dbq:latest \
+  --source 'postgres://user:pass@host:5432/postgres' --type pgx
 
-# server
-docker run --rm -p 8080:8080 -v $PWD/dbq.yaml:/dbq.yaml \
-  -e CONFIG_FILE=/dbq.yaml ghcr.io/rytsh/dbq:latest dbq server
+# background server; see "Run with Docker" above for details
+docker run -d --name dbq --restart unless-stopped -p 8080:8080 \
+  -v "$HOME/.config/dbq/dbq.yaml:/etc/dbq.yaml:ro" \
+  ghcr.io/rytsh/dbq:latest
 ```
 
 ## Building
