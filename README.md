@@ -67,9 +67,17 @@ statement stops the run and `dbq` exits non-zero. Truncation notices for
 
 ## Configuration
 
-`dbq` reads `dbq.yaml` (or `.toml`/`.json`) from the current directory, or the
-file named by `CONFIG_FILE` / `--config`. Every value can also be set from the
-environment with the `DBQ_` prefix, e.g. `DBQ_SERVER_PORT=9090`.
+`dbq` reads `dbq.yaml` (or `.toml`/`.json`) from the first matching location:
+
+1. the current directory;
+2. the OS user config directory's `dbq/` subdirectory (`$XDG_CONFIG_HOME/dbq/`
+   or `~/.config/dbq/` on Linux, `~/Library/Application Support/dbq/` on macOS,
+   `%AppData%\\dbq\\` on Windows);
+3. `/etc/` (for example `/etc/dbq.yaml`).
+
+The file named by `CONFIG_FILE` / `--config` bypasses this search. Every value
+can also be set from the environment with the `DBQ_` prefix, e.g.
+`DBQ_SERVER_PORT=9090`.
 
 ```yaml
 log_level: info

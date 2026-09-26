@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rakunlabs/chu"
 	"github.com/rakunlabs/chu/loader/loaderenv"
+	"github.com/rakunlabs/chu/loader/loaderfile"
 	"github.com/rakunlabs/logi"
 
 	_ "github.com/rakunlabs/chu/loader/external/loaderawssecrets"
@@ -314,6 +317,9 @@ func Load(ctx context.Context) (*Config, error) {
 	cfg := &Config{}
 
 	if err := chu.Load(ctx, ServiceName, cfg,
+		chu.WithLoaderOption(loaderfile.New(
+			loaderfile.WithFolders(configFileFolders()...),
+		)),
 		chu.WithLoaderOption(loaderenv.New(
 			loaderenv.WithPrefix(EnvPrefix),
 		)),
@@ -329,6 +335,19 @@ func Load(ctx context.Context) (*Config, error) {
 	slog.Debug("loaded configuration", "config", chu.MarshalMap(cfg))
 
 	return cfg, nil
+}
+
+// configFileFolders returns the fallback locations searched after the current
+// working directory. CONFIG_FILE/CONFIG_FILE_DBQ, when set, still takes
+// precedence over this search through chu's file loader.
+func configFileFolders() []string {
+	var folders []string
+
+	if configHome, err := os.UserConfigDir(); err == nil && configHome != "" {
+		folders = append(folders, filepath.Join(configHome, ServiceName))
+	}
+
+	return append(folders, "/etc")
 }
 
 // ConnectionDefs converts the configured profiles into database definitions,

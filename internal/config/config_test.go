@@ -1,12 +1,73 @@
 package config
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rytsh/dbq/internal/database"
 )
+
+func TestConfigFileFolders(t *testing.T) {
+	configHome, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("user config directory: %v", err)
+	}
+
+	want := []string{filepath.Join(configHome, "dbq"), "/etc"}
+	if got := configFileFolders(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("configFileFolders() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadConfigFileSearchOrder(t *testing.T) {
+	workingDir := t.TempDir()
+	configHome := t.TempDir()
+	t.Chdir(workingDir)
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("CONFIG_FILE", "")
+	t.Setenv("CONFIG_FILE_DBQ", "")
+
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("user config directory: %v", err)
+	}
+
+	writeConfig := func(path, level string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create config directory: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("log_level: "+level+"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	userFile := filepath.Join(userConfigDir, ServiceName, ServiceName+".yaml")
+	writeConfig(userFile, "warn")
+
+	cfg, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("load user config: %v", err)
+	}
+	if cfg.LogLevel != "warn" {
+		t.Fatalf("user config log level = %q, want warn", cfg.LogLevel)
+	}
+
+	writeConfig(filepath.Join(workingDir, ServiceName+".yaml"), "debug")
+	cfg, err = Load(context.Background())
+	if err != nil {
+		t.Fatalf("load working-directory config: %v", err)
+	}
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("working-directory config log level = %q, want debug", cfg.LogLevel)
+	}
+}
 
 func TestConnectionDefsSkipsDisabled(t *testing.T) {
 	cfg := &Config{Connections: map[string]Connection{
