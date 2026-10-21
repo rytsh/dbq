@@ -21,6 +21,8 @@ type option struct {
 	NoDelimeter bool
 	// Interactive is nil until set, so the terminal can be auto-detected.
 	Interactive *bool
+	// Splitter cuts the buffer into statements. Nil means SQL.
+	Splitter database.Splitter
 }
 
 func (o *option) Apply(opts ...Option) {
@@ -49,6 +51,14 @@ func Interactive(v bool) Option {
 	}
 }
 
+// Splitter sets how statements are delimited, for languages other than SQL:
+// a Redis command per line, a MongoDB command per JSON document.
+func Splitter(split database.Splitter) Option {
+	return func(o *option) {
+		o.Splitter = split
+	}
+}
+
 // Input reads statements from r until EOF or ctx is cancelled.
 //
 // Statements are split at top-level semicolons using the SQL lexer, so a
@@ -68,10 +78,17 @@ func Input(ctx context.Context, r io.Reader, fn func(ctx context.Context, input 
 	cReader, closeReader := cancellable(ctx, r)
 	defer closeReader()
 
+	split, lineDelimited := o.Splitter, true
+	if split == nil {
+		split, lineDelimited = database.SplitComplete, false
+	}
+
 	s := &session{
 		ctx:         ctx,
 		reader:      bufio.NewReader(cReader),
 		fn:          fn,
+		split:       split,
+		eachLine:    lineDelimited,
 		noDelimiter: o.NoDelimeter,
 		interactive: interactive,
 	}
@@ -84,6 +101,8 @@ type session struct {
 	ctx         context.Context
 	reader      *bufio.Reader
 	fn          func(ctx context.Context, input string) error
+	split       database.Splitter
+	eachLine    bool
 	noDelimiter bool
 	interactive bool
 	buffer      strings.Builder
@@ -105,8 +124,9 @@ func (s *session) loop() error {
 		s.buffer.WriteString(line)
 
 		// Re-lexing the whole buffer on every line is only worth it when
-		// the new line could have completed a statement.
-		if strings.Contains(line, ";") {
+		// the new line could have completed a statement. SQL needs a
+		// semicolon; the other languages can end one at any line.
+		if s.eachLine || strings.Contains(line, ";") {
 			if err := s.runComplete(); err != nil {
 				return err
 			}
@@ -123,7 +143,7 @@ func (s *session) loop() error {
 // runComplete executes every terminated statement in the buffer and keeps
 // the unterminated remainder.
 func (s *session) runComplete() error {
-	complete, rest := database.SplitComplete(s.buffer.String())
+	complete, rest := s.split(s.buffer.String())
 
 	for _, stmt := range complete {
 		if err := s.run(stmt); err != nil {

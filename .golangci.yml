@@ -2,6 +2,10 @@ version: "2"
 
 run:
   timeout: 5m
+  # Lint the cgo driver files too; CI installs unixodbc-dev for ODBC.
+  build-tags:
+    - odbc
+    - duckdb
 
 linters:
   default: standard

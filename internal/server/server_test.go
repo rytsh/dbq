@@ -265,7 +265,7 @@ func TestMCPExportInputSchemaHasConstraints(t *testing.T) {
 
 		schema := mustJSON(t, tool.InputSchema)
 		if !strings.Contains(string(schema), `"maximum":1000`) ||
-			!strings.Contains(string(schema), `"enum":["postgresql","sqlite3","sqlserver","oracle","mysql","ingres","odbc"]`) {
+			!strings.Contains(string(schema), `"enum":["postgresql","sqlite3","sqlserver","oracle","mysql","clickhouse","trino","duckdb","ingres","odbc"]`) {
 			t.Fatalf("export schema lacks constraints: %s", schema)
 		}
 

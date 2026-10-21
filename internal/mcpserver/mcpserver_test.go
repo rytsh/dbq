@@ -42,8 +42,22 @@ func TestInstructions(t *testing.T) {
 		t.Errorf("instructions do not mention the row cap:\n%s", text)
 	}
 
-	if !strings.Contains(text, "- ro (type: sqlite3, permission: read-only) — reports") {
+	if !strings.Contains(text, "- ro (type: sqlite3, language: sql, permission: read-only) — reports") {
 		t.Errorf("instructions do not list the connection with its description:\n%s", text)
+	}
+}
+
+func TestInstructionsOnlyDescribeConfiguredLanguages(t *testing.T) {
+	text := buildInstructions(newTestService(t), Options{Scope: service.NewScope(database.PermissionFull, nil, 0)})
+
+	if !strings.Contains(text, "SQL connections:") {
+		t.Errorf("SQL guide missing:\n%s", text)
+	}
+
+	for _, other := range []string{"MongoDB connections:", "Redis connections:", "Cassandra (cql) connections:"} {
+		if strings.Contains(text, other) {
+			t.Errorf("guide %q sent without such a connection", other)
+		}
 	}
 }
 

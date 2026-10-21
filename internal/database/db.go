@@ -2,20 +2,36 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
-	"slices"
 	"time"
 
 	// Drivers register themselves with database/sql on import; the names
 	// they register are listed in Drivers below.
-	_ "github.com/alexbrainman/odbc"
-	_ "github.com/denisenkom/go-mssqldb"
-	_ "github.com/godror/godror"
+	_ "github.com/ClickHouse/clickhouse-go/v2"
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/microsoft/go-mssqldb"
+	_ "github.com/sijms/go-ora/v2"
+	_ "github.com/trinodb/trino-go-client/trino"
 
 	"github.com/jmoiron/sqlx"
+	"modernc.org/sqlite"
 )
+
+func init() {
+	// The pure Go SQLite driver registers itself as "sqlite"; registering it
+	// again as "sqlite3" keeps the driver name dbq has always used.
+	sql.Register("sqlite3", &sqlite.Driver{})
+
+	// go-ora takes :1-style placeholders, but sqlx does not know the
+	// "oracle" driver name and would leave ? untouched in Rebind.
+	sqlx.BindDriver("oracle", sqlx.NAMED)
+
+	for _, name := range []string{"pgx", "mysql", "oracle", "sqlite3", "sqlserver", "clickhouse", "trino"} {
+		RegisterSQLDriver(name)
+	}
+}
 
 // PoolConfig tunes the database/sql pool behind one connection.
 //
@@ -85,22 +101,6 @@ func (p PoolConfig) withDefaults() PoolConfig {
 		MaxLifetime: max(out.MaxLifetime, 0),
 		MaxIdleTime: max(out.MaxIdleTime, 0),
 	}
-}
-
-// Drivers are the database/sql driver names registered by the blank imports above.
-var Drivers = []string{"pgx", "odbc", "godror", "sqlite3", "sqlserver"}
-
-// ValidateDriver reports whether dbType is a driver dbq was built with.
-//
-// database/sql would also reject an unknown driver, but only after the caller
-// has handed over a connection string; checking up front keeps credentials out
-// of driver-level error paths and gives a usable message.
-func ValidateDriver(dbType string) error {
-	if slices.Contains(Drivers, dbType) {
-		return nil
-	}
-
-	return fmt.Errorf("unsupported driver %q, supported: %v", dbType, Drivers)
 }
 
 // ConnectDB opens a pool and verifies it with a ping.

@@ -83,7 +83,9 @@ func (p Pool) toDatabase() database.PoolConfig {
 type Connection struct {
 	// Disabled keeps a profile in configuration without exposing or connecting it.
 	Disabled bool `cfg:"disabled"`
-	// Type is the driver name: pgx, odbc, godror, sqlite3 or sqlserver.
+	// Type is the driver name, e.g. pgx, mysql, oracle, sqlite3, sqlserver,
+	// clickhouse, trino, cassandra, mongodb, redis, or odbc and duckdb in the
+	// cgo build. See database.Drivers for the full list of a build.
 	Type string `cfg:"type"`
 	// Dialect selects database-specific catalog queries when the driver is
 	// generic, for example "ingres" for an Ingres ODBC connection.

@@ -7,9 +7,12 @@ VERSION := $(or $(IMAGE_TAG),$(shell git describe --tags --first-parent --match 
 
 .DEFAULT_GOAL := help
 
+CGO_TAGS := odbc,duckdb
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(BUILD_COMMIT) -X main.date=$(BUILD_DATE)
+
 .PHONY: test
 test: ## Run tests
-	go test -v -race -cover -coverpkg=./... ./...
+	go test -v -race -cover -coverpkg=./... -tags $(CGO_TAGS) ./...
 
 .PHONY: lint
 lint: ## Run linter
@@ -17,8 +20,12 @@ lint: ## Run linter
 	golangci-lint run -v
 
 .PHONY: build
-build: ## Build the binary
-	go build -trimpath -ldflags="-s -w -X main.version=$(VERSION) -X main.commit=$(BUILD_COMMIT) -X main.date=$(BUILD_DATE)" -o bin/$(BINARY_NAME) $(BINARY_PATH)
+build: ## Build the pure Go binary (no cgo, no odbc driver)
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/$(BINARY_NAME) $(BINARY_PATH)
+
+.PHONY: build-cgo
+build-cgo: ## Build the cgo binary with the odbc and duckdb drivers
+	CGO_ENABLED=1 go build -trimpath -tags $(CGO_TAGS) -ldflags="$(LDFLAGS)" -o bin/$(BINARY_NAME)-cgo $(BINARY_PATH)
 
 .PHONY: build-releaser
 build-releaser: ## Build the binary

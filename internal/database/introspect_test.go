@@ -36,3 +36,25 @@ func TestSQLServerForeignKeysUseSysCatalog(t *testing.T) {
 		t.Errorf("args = %v, want [orders dbo]", args)
 	}
 }
+
+func TestMySQLDefaultsToCurrentDatabase(t *testing.T) {
+	query, args := foreignKeyQuery("mysql", "", "orders")
+
+	if !strings.Contains(query, "referenced_table_name") || !strings.Contains(query, "DATABASE()") {
+		t.Errorf("query = %q, want key_column_usage scoped to DATABASE()", query)
+	}
+	if len(args) != 1 || args[0] != "orders" {
+		t.Errorf("args = %v, want [orders]", args)
+	}
+}
+
+func TestClickHouseTableQueryUsesSystemTables(t *testing.T) {
+	query, args := tableQuery("clickhouse", "")
+
+	if !strings.Contains(query, "system.tables") || len(args) != 0 {
+		t.Errorf("query, args = %q, %v; want system.tables", query, args)
+	}
+	if q, _ := foreignKeyQuery("clickhouse", "", "t"); q != "" {
+		t.Errorf("foreign key query = %q, want none", q)
+	}
+}

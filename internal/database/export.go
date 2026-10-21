@@ -42,8 +42,8 @@ type ExportResult struct {
 }
 
 var exportDialects = []string{
-	"godror", "ingres", "mariadb", "mssql", "mysql", "odbc", "oracle", "pgx",
-	"postgres", "postgresql", "sqlite", "sqlite3", "sqlserver",
+	"clickhouse", "duckdb", "godror", "ingres", "mariadb", "mssql", "mysql", "odbc", "oracle", "pgx",
+	"postgres", "postgresql", "sqlite", "sqlite3", "sqlserver", "trino",
 }
 
 // NormalizeExportDialect validates a target dialect and returns its canonical name.
@@ -317,6 +317,9 @@ func sqlStringLiteral(dialect, value string) string {
 		return "convert_from(decode('" + strings.ToUpper(hex.EncodeToString([]byte(value))) + "', 'hex'), 'UTF8')"
 	case "sqlserver":
 		return "N" + quoteString(value)
+	case "clickhouse":
+		// ClickHouse treats backslash as an escape inside string literals.
+		return quoteString(strings.ReplaceAll(value, `\`, `\\`))
 	default:
 		return quoteString(value)
 	}
@@ -348,7 +351,7 @@ func quoteQualifiedIdentifier(dialect, name string) string {
 
 func quoteIdentifier(dialect, name string) string {
 	switch strings.ToLower(dialect) {
-	case "mysql", "mariadb":
+	case "mysql", "mariadb", "clickhouse":
 		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 	case "sqlserver", "mssql":
 		return "[" + strings.ReplaceAll(name, "]", "]]") + "]"

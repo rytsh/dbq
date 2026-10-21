@@ -84,7 +84,7 @@ func foreignKeyQuery(driver, schema, table string) (string, []any) {
 	case "sqlite3":
 		return `SELECT "from", "table", COALESCE("to", '') FROM pragma_foreign_key_list(?)`, []any{table}
 
-	case "godror":
+	case "oracle":
 		q := `SELECT cc.column_name, rc.table_name, rc.column_name
 			FROM all_constraints c
 			JOIN all_cons_columns cc ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
@@ -123,9 +123,26 @@ func foreignKeyQuery(driver, schema, table string) (string, []any) {
 
 		return q + ` ORDER BY fkc.constraint_column_id`, args
 
-	case "ingres":
-		// Ingres predates information_schema and exposes constraints through
-		// vendor catalogs. Foreign-key discovery can be added independently.
+	case "mysql":
+		// MySQL records the referenced side on key_column_usage itself.
+		q := `SELECT column_name, referenced_table_name, referenced_column_name
+			FROM information_schema.key_column_usage
+			WHERE referenced_table_name IS NOT NULL AND table_name = ?`
+
+		args := []any{table}
+		if schema != "" {
+			q += ` AND table_schema = ?`
+
+			args = append(args, schema)
+		} else {
+			q += ` AND table_schema = DATABASE()`
+		}
+
+		return q + ` ORDER BY ordinal_position`, args
+
+	case "ingres", "clickhouse", "trino":
+		// Ingres exposes constraints only through vendor catalogs; ClickHouse
+		// and Trino have no foreign keys.
 		return "", nil
 
 	default:
@@ -158,8 +175,9 @@ func foreignKeyQuery(driver, schema, table string) (string, []any) {
 //
 // schema is optional; when empty every non-system schema is returned. The
 // queries are driver-specific because catalog layout is not portable:
-// information_schema exists on PostgreSQL and SQL Server, SQLite has
-// sqlite_master, and Oracle has the ALL_* views.
+// information_schema exists on PostgreSQL, SQL Server, MySQL, Trino and DuckDB,
+// SQLite has sqlite_master, Oracle has the ALL_* views and ClickHouse has
+// system.tables.
 func ListTables(ctx context.Context, db *sqlx.DB, driver, schema string) ([]Table, error) {
 	query, args := tableQuery(driver, schema)
 
@@ -198,7 +216,7 @@ func tableQuery(driver, schema string) (string, []any) {
 			WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
 			ORDER BY name`, nil
 
-	case "godror":
+	case "oracle":
 		// Oracle identifiers are stored upper-cased.
 		if schema != "" {
 			return `SELECT owner, table_name, 'BASE TABLE' FROM all_tables WHERE owner = UPPER(?)
@@ -229,8 +247,34 @@ func tableQuery(driver, schema string) (string, []any) {
 			WHERE system_use = 'U' AND table_type IN ('T', 'V')
 			ORDER BY table_owner, table_name`, nil
 
+	case "mysql":
+		if schema != "" {
+			return `SELECT table_schema, table_name, table_type
+				FROM information_schema.tables
+				WHERE table_schema = ?
+				ORDER BY table_schema, table_name`, []any{schema}
+		}
+
+		return `SELECT table_schema, table_name, table_type
+			FROM information_schema.tables
+			WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys')
+			ORDER BY table_schema, table_name`, nil
+
+	case "clickhouse":
+		q := `SELECT database, name, CASE WHEN engine IN ('View','MaterializedView','LiveView') THEN 'VIEW' ELSE 'BASE TABLE' END
+			FROM system.tables
+			WHERE is_temporary = 0`
+
+		if schema != "" {
+			return q + ` AND database = ? ORDER BY database, name`, []any{schema}
+		}
+
+		return q + ` AND database NOT IN ('system','information_schema','INFORMATION_SCHEMA')
+			ORDER BY database, name`, nil
+
 	default:
-		// pgx, sqlserver and most ODBC targets expose information_schema.
+		// pgx, sqlserver, trino, duckdb and most ODBC targets expose
+		// information_schema.
 		if schema != "" {
 			return `SELECT table_schema, table_name, table_type
 				FROM information_schema.tables
@@ -251,12 +295,7 @@ func DescribeTable(ctx context.Context, db *sqlx.DB, driver, schema, table strin
 		return nil, fmt.Errorf("table name is required")
 	}
 
-	// "schema.table" is the shape people actually type; accept it.
-	if schema == "" {
-		if s, t, ok := strings.Cut(table, "."); ok {
-			schema, table = s, t
-		}
-	}
+	schema, table = SplitQualified(schema, table)
 
 	columns, err := describeColumns(ctx, db, driver, schema, table)
 	if err != nil {
@@ -290,13 +329,78 @@ func describeColumns(ctx context.Context, db *sqlx.DB, driver, schema, table str
 	switch driver {
 	case "sqlite3":
 		return sqliteColumns(ctx, db, table)
-	case "godror":
+	case "oracle":
 		return oracleColumns(ctx, db, schema, table)
 	case "ingres":
 		return ingresColumns(ctx, db, schema, table)
+	case "mysql":
+		return mysqlColumns(ctx, db, schema, table)
+	case "clickhouse":
+		return clickhouseColumns(ctx, db, schema, table)
+	case "trino":
+		return trinoColumns(ctx, db, schema, table)
 	default:
 		return infoSchemaColumns(ctx, db, schema, table)
 	}
+}
+
+func mysqlColumns(ctx context.Context, db *sqlx.DB, schema, table string) ([]Column, error) {
+	// MySQL has no VARCHAR cast target and marks key columns on the column
+	// row itself, so the information_schema query is written separately.
+	q := `SELECT column_name, column_type, is_nullable, COALESCE(column_default, ''),
+			ordinal_position, CASE WHEN column_key = 'PRI' THEN 1 ELSE 0 END
+		FROM information_schema.columns
+		WHERE table_name = ?`
+	args := []any{table}
+
+	if schema != "" {
+		q += ` AND table_schema = ?`
+		args = append(args, schema)
+	} else {
+		q += ` AND table_schema = DATABASE()`
+	}
+
+	q += ` ORDER BY ordinal_position`
+
+	return scanColumns(ctx, db, q, args, "YES")
+}
+
+func clickhouseColumns(ctx context.Context, db *sqlx.DB, schema, table string) ([]Column, error) {
+	q := `SELECT name, type, CASE WHEN startsWith(type, 'Nullable(') THEN 'YES' ELSE 'NO' END,
+			default_expression, toInt64(position), toInt64(is_in_primary_key)
+		FROM system.columns
+		WHERE table = ?`
+	args := []any{table}
+
+	if schema != "" {
+		q += ` AND database = ?`
+		args = append(args, schema)
+	} else {
+		q += ` AND database = currentDatabase()`
+	}
+
+	q += ` ORDER BY position`
+
+	return scanColumns(ctx, db, q, args, "YES")
+}
+
+func trinoColumns(ctx context.Context, db *sqlx.DB, schema, table string) ([]Column, error) {
+	// Trino's information_schema has no constraint tables, so primary keys
+	// cannot be reported.
+	q := `SELECT column_name, data_type, is_nullable, COALESCE(column_default, ''),
+			CAST(ordinal_position AS BIGINT), 0
+		FROM information_schema.columns
+		WHERE table_name = ?`
+	args := []any{table}
+
+	if schema != "" {
+		q += ` AND table_schema = ?`
+		args = append(args, schema)
+	}
+
+	q += ` ORDER BY ordinal_position`
+
+	return scanColumns(ctx, db, q, args, "YES")
 }
 
 func ingresColumns(ctx context.Context, db *sqlx.DB, schema, table string) ([]Column, error) {

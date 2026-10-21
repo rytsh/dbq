@@ -2,7 +2,10 @@
 // schema introspection.
 package database
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Kind is the coarse classification of a SQL statement.
 type Kind string
@@ -59,6 +62,10 @@ type Analysis struct {
 	// Reason explains Unbounded or Refused, in terms an operator and a model
 	// can both act on.
 	Reason string
+	// Advice, when set, replaces the generic next step given with a refusal.
+	// Non-SQL analyzers use it, since the SQL advice (add a WHERE clause,
+	// send one statement) does not apply to their language.
+	Advice string
 }
 
 // severity orders analyses so the most dangerous reading of an ambiguous
@@ -366,6 +373,10 @@ func analyzeRead(ts []token) Analysis {
 			continue
 		}
 
+		if a, external := externalRead(ts, i); external {
+			return a
+		}
+
 		if ts[i].Type != tWord {
 			continue
 		}
@@ -403,6 +414,51 @@ func analyzeRead(ts []token) Analysis {
 }
 
 var lockingModes = map[string]bool{"update": true, "share": true, "key": true, "no": true}
+
+// externalTableFuncs are ClickHouse and DuckDB functions that make a SELECT
+// read the server's filesystem, fetch URLs, query other servers or run
+// programs. DuckDB runs inside the dbq process, so for it the "server" is the
+// dbq host. The statement still looks like a read, so the call is what has
+// to be caught.
+var externalTableFuncs = map[string]bool{
+	// ClickHouse
+	"file": true, "url": true, "s3": true, "s3cluster": true, "gcs": true,
+	"azureblobstorage": true, "hdfs": true, "remote": true, "remotesecure": true,
+	"cluster": true, "clusterallreplicas": true, "mysql": true, "postgresql": true,
+	"mongodb": true, "redis": true, "jdbc": true, "odbc": true, "sqlite": true,
+	"executable": true, "deltalake": true, "iceberg": true, "hudi": true,
+	// DuckDB
+	"read_csv": true, "read_csv_auto": true, "read_parquet": true, "parquet_scan": true,
+	"read_json": true, "read_json_auto": true, "read_ndjson": true, "read_json_objects": true,
+	"read_text": true, "read_blob": true, "read_xlsx": true, "sqlite_scan": true,
+	"postgres_scan": true, "mysql_scan": true, "iceberg_scan": true, "delta_scan": true,
+	"glob": true, "query": true, "query_table": true, "getenv": true,
+}
+
+// externalRead reports whether the token at i makes a read statement reach
+// outside the database: a call to one of externalTableFuncs, or DuckDB's
+// `FROM 'file.csv'` shorthand, where a string literal names a file to scan.
+func externalRead(ts []token, i int) (Analysis, bool) {
+	t := ts[i]
+
+	if t.Type == tString && i > 0 && (ts[i-1].is("from") || ts[i-1].is("join")) {
+		return Analysis{Kind: KindSchema, Reason: "FROM a string literal reads a file or URL"}, true
+	}
+
+	if t.Type != tWord && t.Type != tQuoted {
+		return Analysis{}, false
+	}
+
+	name := strings.ToLower(t.Text)
+	if !externalTableFuncs[name] || i+1 >= len(ts) || ts[i+1].Type != tPunct || ts[i+1].Text != "(" {
+		return Analysis{}, false
+	}
+
+	return Analysis{
+		Kind:   KindSchema,
+		Reason: name + "() reads files, URLs, the environment or other servers on behalf of the database",
+	}, true
+}
 
 // pragmaQueries are the SQLite pragmas that take an argument in call form and
 // only read: PRAGMA table_info(t). Every other pragma with an argument, in
@@ -544,6 +600,10 @@ func analyzeInsert(ts []token) Analysis {
 		switch ts[i].Text {
 		case "values":
 			valuesSeen = true
+		case "function":
+			// ClickHouse INSERT INTO FUNCTION file(...)/s3(...) writes outside
+			// the database.
+			return Analysis{Kind: KindSchema, Reason: "INSERT INTO FUNCTION writes to files, URLs or other servers"}
 		case "overwrite":
 			return Analysis{Kind: KindWrite, Unbounded: true, Reason: "INSERT OVERWRITE replaces existing data"}
 		case "duplicate":

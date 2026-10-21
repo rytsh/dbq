@@ -107,6 +107,15 @@ func runREPL(cmd *cobra.Command, global *globalFlags, local *replFlags) error {
 		return nil
 	}
 
+	def, err := svc.Manager().Def(connection)
+	if err != nil {
+		return err
+	}
+
+	if language := database.LanguageOf(def.Type); language != database.LanguageSQL {
+		source.options = append(source.options, input.Splitter(database.SplitterFor(language)))
+	}
+
 	run := func(ctx context.Context, sql string) error {
 		res, err := svc.Execute(ctx, scope, service.ExecuteRequest{
 			Connection: connection,

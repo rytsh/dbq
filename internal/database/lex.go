@@ -57,6 +57,9 @@ type dialect struct {
 	// this rule `SELECT 1--1; DROP TABLE t` reads as a single statement while
 	// the server sees two.
 	DashCommentNeedsSpace bool
+	// CQL is Cassandra's lexical profile: // starts a line comment, # does
+	// not, and [ ] is a list literal rather than a quoted identifier.
+	CQL bool
 }
 
 // dbq does not know which engine a statement is bound for at classification
@@ -69,6 +72,7 @@ var (
 	dialectStandard = dialect{
 		BackslashEscapes: false, NestedBlockComments: true, ExecutableComments: false, DashCommentNeedsSpace: false,
 	}
+	dialectCQL = dialect{CQL: true}
 )
 
 // lex turns SQL into tokens, discarding comments and literal contents.
@@ -109,7 +113,7 @@ func (l *lexer) emit(t tokenType, text string) {
 	l.out = append(l.out, token{Type: t, Text: text})
 }
 
-//nolint:cyclop // A lexer is a dispatch table; splitting it would hide the ordering that matters.
+//nolint:cyclop,gocognit // A lexer is a dispatch table; splitting it would hide the ordering that matters.
 func (l *lexer) run(src []rune) {
 	for i := 0; i < len(src); {
 		c := src[i]
@@ -119,11 +123,14 @@ func (l *lexer) run(src []rune) {
 			next = src[i+1]
 		}
 
+		if end, ok := l.dialectToken(src, i, c, next); ok {
+			i = end
+
+			continue
+		}
+
 		switch {
 		case c == '-' && next == '-' && l.dashComment(src, i):
-			i = skipLine(src, i)
-
-		case c == '#':
 			i = skipLine(src, i)
 
 		case c == '/' && next == '*':
@@ -212,6 +219,39 @@ func (l *lexer) run(src []rune) {
 
 			i++
 		}
+	}
+}
+
+// dialectToken lexes the constructs on which the dialects disagree: # is a
+// comment in SQL but not CQL, while CQL has // comments, $$ ... $$ strings,
+// and [ ] list literals rather than quoted identifiers. It reports false for
+// everything else, which the common rules in run handle.
+func (l *lexer) dialectToken(src []rune, i int, c, next rune) (int, bool) {
+	if !l.dialect.CQL {
+		if c == '#' {
+			return skipLine(src, i), true
+		}
+
+		return i, false
+	}
+
+	switch {
+	case c == '/' && next == '/':
+		return skipLine(src, i), true
+	case c == '$' && next == '$':
+		l.emit(tString, "")
+
+		return skipDollarQuoted(src, i, "$$"), true
+	case c == '[' || c == ']':
+		l.emit(tPunct, string(c))
+
+		return i + 1, true
+	case c == '#':
+		l.emit(tPunct, "#")
+
+		return i + 1, true
+	default:
+		return i, false
 	}
 }
 

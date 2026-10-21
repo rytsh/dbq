@@ -18,6 +18,12 @@ release:
     # curl -fSL https://github.com/rytsh/dbq/releases/latest/download/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
     curl -fSL https://github.com/rytsh/dbq/releases/download/{{ .Tag }}/dbq_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq
     ```
+
+    Need ODBC or DuckDB? Use the cgo build instead (ODBC requires unixODBC):
+
+    ```sh
+    curl -fSL https://github.com/rytsh/dbq/releases/download/{{ .Tag }}/dbq-cgo_Linux_x86_64.tar.gz | tar -xz --overwrite -C ~/bin/ dbq-cgo
+    ```
   footer: |
     **Full Changelog**: https://github.com/rytsh/dbq/compare/{{ .PreviousTag }}...{{ .Tag }}
 before:
@@ -25,23 +31,44 @@ before:
     # You may remove this if you don't use go modules.
     - go mod tidy
 builds:
-  - env:
-      - CGO_ENABLED=1
+  # Pure Go build: every driver except ODBC, no cgo, runs anywhere.
+  - id: dbq
+    binary: dbq
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
-      # - windows
-      # - darwin
+      - windows
+      - darwin
     goarch:
       - amd64
-      # - arm
-      # - arm64
+      - arm64
     main: ./cmd/dbq
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     flags:
       - -trimpath
+  # cgo build: adds ODBC (needs unixODBC/libodbc at runtime) and DuckDB.
+  - id: dbq-cgo
+    binary: dbq-cgo
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    main: ./cmd/dbq
+    tags:
+      - odbc
+      - duckdb
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+    flags:
+      - -trimpath
 archives:
-  - name_template: >-
+  - id: dbq
+    ids: [dbq]
+    name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
@@ -51,6 +78,15 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+  - id: dbq-cgo
+    ids: [dbq-cgo]
+    name_template: >-
+      {{ .ProjectName }}-cgo_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
 checksum:
   name_template: '{{ .ProjectName }}-{{ .Version }}-checksums.txt'
 snapshot:
@@ -85,7 +121,8 @@ changelog:
       order: 9999
 
 dockers:
-- image_templates:
+- ids: [dbq-cgo]
+  image_templates:
   - 'ghcr.io/rytsh/dbq:{{ .Tag }}'
   - 'ghcr.io/rytsh/dbq:latest'
   dockerfile: ci/Dockerfile

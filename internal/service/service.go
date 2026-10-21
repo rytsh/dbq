@@ -158,12 +158,12 @@ func (s *Service) ListTables(ctx context.Context, scope Scope, connection, schem
 		return nil, err
 	}
 
-	db, err := s.manager.DB(ctx, def.Name)
+	backend, err := s.manager.Backend(ctx, def.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	return database.ListTables(ctx, db, def.CatalogType(), schema)
+	return backend.ListTables(ctx, schema)
 }
 
 // DescribeTable returns the column layout of a table.
@@ -176,12 +176,12 @@ func (s *Service) DescribeTable(ctx context.Context, scope Scope, connection, sc
 		return nil, err
 	}
 
-	db, err := s.manager.DB(ctx, def.Name)
+	backend, err := s.manager.Backend(ctx, def.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	return database.DescribeTable(ctx, db, def.CatalogType(), schema, table)
+	return backend.DescribeTable(ctx, schema, table)
 }
 
 // SchemaContextRequest asks for a compact description of a whole schema.
@@ -223,12 +223,12 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 		return nil, err
 	}
 
-	db, err := s.manager.DB(ctx, def.Name)
+	backend, err := s.manager.Backend(ctx, def.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	tables, err := database.ListTables(ctx, db, def.CatalogType(), req.Schema)
+	tables, err := backend.ListTables(ctx, req.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func (s *Service) SchemaContext(ctx context.Context, scope Scope, req SchemaCont
 	}
 
 	for _, t := range tables {
-		detail, err := database.DescribeTable(ctx, db, def.CatalogType(), t.Schema, t.Name)
+		detail, err := backend.DescribeTable(ctx, t.Schema, t.Name)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -357,11 +357,12 @@ func compactSchema(tables []database.TableDetail) string {
 	return b.String()
 }
 
-// ExecuteRequest is a single SQL statement to run.
+// ExecuteRequest is a single statement to run.
 type ExecuteRequest struct {
 	// Connection is the required profile name.
 	Connection string
-	// SQL is the statement. Exactly one statement is expected.
+	// SQL is the statement, in the connection's query language (SQL, CQL, a
+	// MongoDB command document or a Redis command). Exactly one is expected.
 	SQL string
 	// MaxRows overrides the scope row limit. Zero uses the scope default.
 	MaxRows int
@@ -391,16 +392,16 @@ func (s *Service) Execute(ctx context.Context, scope Scope, req ExecuteRequest) 
 		permission = permission.Min(database.PermissionReadOnly)
 	}
 
-	if _, err := database.Authorize(def.Name, req.SQL, permission); err != nil {
+	if _, err := database.AuthorizeAnalysis(def.Name, database.AnalyzeFor(def.Type, req.SQL), permission); err != nil {
 		return nil, err
 	}
 
-	db, err := s.manager.DB(ctx, def.Name)
+	backend, err := s.manager.Backend(ctx, def.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	return database.Execute(ctx, db, req.SQL, database.QueryOptions{
+	return backend.Execute(ctx, req.SQL, database.QueryOptions{
 		MaxRows:      cappedLimit(req.MaxRows, scope.MaxRows, database.DefaultMaxRows),
 		MaxCellChars: cappedLimit(req.MaxCellChars, scope.MaxCellChars, database.DefaultMaxCellChars),
 		Timeout:      scope.Timeout,
@@ -428,13 +429,22 @@ func (s *Service) ExportInserts(ctx context.Context, scope Scope, req ExportRequ
 		return nil, fmt.Errorf("sql is required")
 	}
 
+	if database.LanguageOf(def.Type) != database.LanguageSQL {
+		return nil, fmt.Errorf("connection %q: export is only available for SQL connections", def.Name)
+	}
+
 	if _, err := database.Authorize(def.Name, req.SQL, permission.Min(database.PermissionReadOnly)); err != nil {
 		return nil, err
 	}
 
-	db, err := s.manager.DB(ctx, def.Name)
+	backend, err := s.manager.Backend(ctx, def.Name)
 	if err != nil {
 		return nil, err
+	}
+
+	sqlBackend, ok := backend.(*database.SQLBackend)
+	if !ok {
+		return nil, fmt.Errorf("connection %q: export is only available for SQL connections", def.Name)
 	}
 
 	dialect := req.TargetDialect
@@ -446,7 +456,7 @@ func (s *Service) ExportInserts(ctx context.Context, scope Scope, req ExportRequ
 		return nil, err
 	}
 
-	return database.ExportInserts(ctx, db, req.SQL, w, database.ExportOptions{
+	return database.ExportInserts(ctx, sqlBackend.DB, req.SQL, w, database.ExportOptions{
 		Dialect:   dialect,
 		Table:     req.TargetTable,
 		BatchSize: req.BatchSize,

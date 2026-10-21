@@ -76,7 +76,7 @@ func New(svc *service.Service, opts Options) *mcp.Server {
 			Name:        opts.Name,
 			Version:     opts.Version,
 			Title:       "dbq",
-			Description: "Inspect and query SQL databases through dbq's configured connections.",
+			Description: "Inspect and query databases (SQL, Cassandra, MongoDB, Redis) through dbq's configured connections.",
 		},
 		&mcp.ServerOptions{
 			Instructions: buildInstructions(svc, opts),
@@ -159,14 +159,14 @@ func buildInstructions(svc *service.Service, opts Options) string {
 		maxRows = database.DefaultMaxRows
 	}
 
-	b.WriteString("dbq gives you read and (where permitted) write access to SQL databases ")
+	b.WriteString("dbq gives you read and (where permitted) write access to databases ")
 	b.WriteString("that an operator has configured as named connections.\n\n")
 
 	b.WriteString("Workflow:\n")
 	b.WriteString("1. Call " + ToolPrefix + "list_connections to see which databases you can reach.\n")
 	b.WriteString("2. Call " + ToolPrefix + "schema_context for a compact overview of a database, ")
 	b.WriteString("or " + ToolPrefix + "list_tables plus " + ToolPrefix + "describe_table when you only need a few tables.\n")
-	b.WriteString("3. Write SQL against the real column names you just read, then run it with " + ToolPrefix + "query.\n\n")
+	b.WriteString("3. Write a statement against the real names you just read, then run it with " + ToolPrefix + "query.\n\n")
 	if opts.Exports != nil {
 		b.WriteString("4. When the user wants data saved or moved, use " + ToolPrefix + "export; it creates a downloadable SQL artifact without putting row data in model context.\n\n")
 	}
@@ -184,15 +184,18 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	b.WriteString("if truncated is true you are seeing a partial result, not the full answer.\n")
 	b.WriteString("- Long text values are shortened. If cells_truncated is non-zero, the values shown are prefixes; ")
 	b.WriteString("narrow the query to the row and column you need rather than raising the limit blindly.\n")
-	b.WriteString("- Send exactly one statement per call. Statements separated by semicolons are refused.\n")
-	b.WriteString("- Write SQL in the dialect of the connection's type (pgx = PostgreSQL, sqlite3 = SQLite, ")
-	b.WriteString("sqlserver = SQL Server, godror = Oracle, odbc = the ODBC target).\n")
+	b.WriteString("- Send exactly one statement per call.\n")
+	b.WriteString("- Each connection has a language (see list_connections). Write the statement in it; ")
+	b.WriteString("the argument is called sql for every language.\n")
 	b.WriteString("- Each connection has a permission level. read-only rejects every write. safe-write allows ")
 	b.WriteString("only writes with a bounded reach: INSERT ... VALUES, and UPDATE or DELETE on a single table ")
 	b.WriteString("with a WHERE clause that selects specific rows. Writes without an effective WHERE clause, ")
 	b.WriteString("INSERT ... SELECT, upserts, MERGE, joined writes and subqueries in WHERE need full, as does DDL. ")
 	b.WriteString("A rejected statement is a policy decision, not a bug: do not try to work around it.\n")
-	b.WriteString("- Always scope UPDATE and DELETE with a specific WHERE clause. Never rely on WHERE 1=1.\n\n")
+	b.WriteString("- Always scope UPDATE and DELETE with a specific WHERE clause. Never rely on WHERE 1=1.\n")
+
+	writeLanguageGuides(&b, svc.Connections(opts.Scope))
+	b.WriteString("\n")
 
 	if !svc.CanWrite(opts.Scope) {
 		b.WriteString("- This endpoint is read-only: no write tool is available. ")
@@ -202,7 +205,7 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	b.WriteString("\nAvailable connections:\n")
 
 	for _, info := range svc.Connections(opts.Scope) {
-		fmt.Fprintf(&b, "- %s (type: %s, permission: %s)", info.Name, info.Type, info.Permission)
+		fmt.Fprintf(&b, "- %s (type: %s, language: %s, permission: %s)", info.Name, info.Type, info.Language, info.Permission)
 
 		if info.Description != "" {
 			fmt.Fprintf(&b, " — %s", info.Description)
@@ -212,6 +215,51 @@ func buildInstructions(svc *service.Service, opts Options) string {
 	}
 
 	return b.String()
+}
+
+// languageGuides tell a model how to write a statement in each non-SQL
+// language. Only the guides for languages that are actually configured are
+// sent, so a SQL-only deployment pays nothing for them.
+var languageGuides = map[string]string{
+	database.LanguageSQL: "SQL connections: write SQL in the dialect of the connection's type (pgx = PostgreSQL, " +
+		"mysql = MySQL/MariaDB, sqlite3 = SQLite, sqlserver = SQL Server, oracle = Oracle, " +
+		"clickhouse = ClickHouse, trino = Trino, duckdb = DuckDB, odbc = the ODBC target). " +
+		"Send exactly one statement; statements separated by semicolons are refused.",
+	database.LanguageCQL: "Cassandra (cql) connections: write CQL. SELECT must restrict the partition key or it " +
+		"is rejected by the server; qualify tables as keyspace.table, since USE is refused. " +
+		"BEGIN BATCH ... APPLY BATCH counts as one statement. Tables are listed per keyspace " +
+		"(the schema argument).",
+	database.LanguageMongoDB: "MongoDB connections: send one database command as Extended JSON, exactly what " +
+		"db.runCommand() takes, not shell syntax. Examples: " +
+		`{"find": "users", "filter": {"age": {"$gt": 30}}, "projection": {"name": 1}, "limit": 20}; ` +
+		`{"aggregate": "orders", "pipeline": [{"$group": {"_id": "$status", "n": {"$sum": 1}}}], "cursor": {}}; ` +
+		`{"count": "users", "query": {"active": true}}; ` +
+		`{"update": "users", "updates": [{"q": {"_id": {"$oid": "..."}}, "u": {"$set": {"a": 1}}}]}; ` +
+		`{"delete": "users", "deletes": [{"q": {"_id": 1}, "limit": 1}]}. ` +
+		"Each document becomes a row with one column per top-level field; nested values are JSON. " +
+		"Updates and deletes need a selective filter (an empty filter, $exists, $ne or $expr needs full access). " +
+		"$out, $merge, $where and $function are treated as writes or schema changes. " +
+		"Collections have no fixed schema: describe_table infers fields from a sample of documents.",
+	database.LanguageRedis: "Redis connections: send one command in redis-cli syntax, e.g. GET user:1, " +
+		`HGETALL user:1, ZRANGE board 0 9 WITHSCORES, SCAN 0 MATCH user:* COUNT 100, SET k "v" EX 60. ` +
+		"Use SCAN, never KEYS (KEYS needs full access). list_tables takes a MATCH pattern as the schema " +
+		"argument and reports each key with its type; describe_table reports a key's type, TTL and size. " +
+		"Transactions, SELECT, blocking pops and pub/sub subscriptions are refused, and scripts (EVAL) " +
+		"need full access.",
+}
+
+func writeLanguageGuides(b *strings.Builder, connections []database.ConnectionInfo) {
+	seen := map[string]bool{}
+
+	for _, language := range []string{database.LanguageSQL, database.LanguageCQL, database.LanguageMongoDB, database.LanguageRedis} {
+		for _, info := range connections {
+			if info.Language == language && !seen[language] {
+				seen[language] = true
+
+				b.WriteString("- " + languageGuides[language] + "\n")
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -260,21 +308,21 @@ type schemaContextOutput struct {
 
 type queryInput struct {
 	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
-	SQL        string `json:"sql" jsonschema:"exactly one read-only SQL statement (SELECT, SHOW, EXPLAIN, or WITH ... SELECT) in the connection's dialect; do not send several statements separated by semicolons"`
+	SQL        string `json:"sql" jsonschema:"exactly one read-only statement in the connection's language: SQL (SELECT, SHOW, EXPLAIN, WITH ... SELECT), CQL, a MongoDB command document, or a Redis command; do not send several statements"`
 	MaxRows    int    `json:"max_rows,omitempty" jsonschema:"rows to return; may be lower than the server's cap, never higher"`
 	MaxChars   int    `json:"max_chars,omitempty" jsonschema:"characters to keep per text value before it is shortened; may be lower than the server's cap, never higher, so narrow the query to the row and column you need instead of asking for more"`
 }
 
 type executeInput struct {
 	Connection string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
-	SQL        string `json:"sql" jsonschema:"exactly one data- or schema-modifying SQL statement; UPDATE and DELETE must carry a WHERE clause that selects specific rows"`
+	SQL        string `json:"sql" jsonschema:"exactly one data- or schema-modifying statement in the connection's language; UPDATE and DELETE must select specific rows or documents"`
 }
 
 type exportInput struct {
 	Connection    string `json:"connection" jsonschema:"connection name from dbq_list_connections"`
 	SQL           string `json:"sql" jsonschema:"exactly one read-only SELECT whose visible result columns and rows will be exported"`
 	TargetTable   string `json:"target_table" jsonschema:"table name to use in the generated INSERT statements; schema.table is accepted"`
-	TargetDialect string `json:"target_dialect,omitempty" jsonschema:"dialect for generated SQL (postgresql, sqlite3, sqlserver, oracle, mysql); omit to use the source connection dialect"`
+	TargetDialect string `json:"target_dialect,omitempty" jsonschema:"dialect for generated SQL (postgresql, sqlite3, sqlserver, oracle, mysql, clickhouse, trino, duckdb); omit to use the source connection dialect"`
 	BatchSize     int    `json:"batch_size,omitempty" jsonschema:"rows per INSERT statement; default 100"`
 	Filename      string `json:"filename,omitempty" jsonschema:"download filename without a directory; .sql is added when omitted"`
 }
@@ -411,7 +459,8 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			ReadOnlyHint:  true,
 			OpenWorldHint: &closedWorld,
 		},
-		Description: "Run one read-only SQL statement (SELECT, SHOW, EXPLAIN, WITH ... SELECT) and " +
+		Description: "Run one read-only statement in the connection's language (SQL SELECT/SHOW/EXPLAIN, " +
+			"CQL SELECT, a MongoDB find/aggregate/count command, or a Redis read command) and " +
 			"return the rows. Writes and DDL are always refused here regardless of the connection's " +
 			"permission. Database-role privileges remain the final security boundary because read-classified functions may still have side effects. Results are capped: if truncated is " +
 			"true, narrow the query with a WHERE clause or aggregate instead of paging blindly.",
@@ -446,7 +495,7 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 				DestructiveHint: &nonDestructive,
 				OpenWorldHint:   &closedWorld,
 			},
-			Description: "Run one read-only SELECT and stream every returned row into a short-lived downloadable .sql file containing batched INSERT statements. " +
+			Description: "SQL connections only. Run one read-only SELECT and stream every returned row into a short-lived downloadable .sql file containing batched INSERT statements. " +
 				"The exported data is never returned in the MCP response or placed in model context; only a small manifest and download URL are returned. " +
 				"Use this instead of dbq_query when the user wants to move or save data. The query must explicitly select the desired columns and rows.",
 			InputSchema: exportInputSchema(),
@@ -523,7 +572,8 @@ func registerTools(server *mcp.Server, svc *service.Service, opts Options) {
 			DestructiveHint: &destructive,
 			OpenWorldHint:   &closedWorld,
 		},
-		Description: "Run one data-modifying or schema-modifying SQL statement and return the number " +
+		Description: "Run one data-modifying or schema-modifying statement in the connection's language " +
+			"(SQL, CQL, a MongoDB command document or a Redis command) and return the number " +
 			"of affected rows. The statement is refused unless the connection's permission level " +
 			"allows it: read-only refuses everything; safe-write allows INSERT ... VALUES and " +
 			"single-table UPDATE/DELETE with a WHERE clause that selects specific rows; full is " +
@@ -563,7 +613,7 @@ func exportInputSchema() *jsonschema.Schema {
 	schema.Properties["sql"].MinLength = &minLength
 	schema.Properties["target_table"].MinLength = &minLength
 	schema.Properties["target_dialect"].Enum = []any{
-		"postgresql", "sqlite3", "sqlserver", "oracle", "mysql", "ingres", "odbc",
+		"postgresql", "sqlite3", "sqlserver", "oracle", "mysql", "clickhouse", "trino", "duckdb", "ingres", "odbc",
 	}
 	minimum := float64(1)
 	maximum := float64(database.MaxExportBatchSize)

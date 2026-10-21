@@ -134,13 +134,17 @@ func (e *StatementError) Error() string {
 	return b.String()
 }
 
-// Authorize checks a statement against a granted permission level.
+// Authorize checks a SQL statement against a granted permission level.
 //
 // It returns the analysis so the caller can decide between Query and Exec
 // without re-parsing.
 func Authorize(connection, sql string, granted Permission) (Analysis, error) {
-	analysis := Analyze(sql)
+	return AuthorizeAnalysis(connection, Analyze(sql), granted)
+}
 
+// AuthorizeAnalysis checks an already classified statement, in any language,
+// against a granted permission level.
+func AuthorizeAnalysis(connection string, analysis Analysis, granted Permission) (Analysis, error) {
 	// Some statements cannot be made safe by any permission level: a batch,
 	// because only its first statement was classified, and a connection-state
 	// statement, because dbq hands out pooled connections.
@@ -172,6 +176,10 @@ func Authorize(connection, sql string, granted Permission) (Analysis, error) {
 }
 
 func refusalAdvice(analysis Analysis) string {
+	if analysis.Advice != "" {
+		return analysis.Advice
+	}
+
 	if analysis.Kind == KindSession {
 		return "Run it through a database client that owns its own connection"
 	}
@@ -183,6 +191,8 @@ func refusalAdvice(analysis Analysis) string {
 // the moment it fails but may have long since lost the server instructions.
 func advice(analysis Analysis, granted Permission) string {
 	switch {
+	case analysis.Advice != "":
+		return analysis.Advice
 	case analysis.Unbounded && granted.CanWrite():
 		return "Add a WHERE clause that selects specific rows, or ask the user to raise this connection's permission level"
 	case analysis.Kind == KindSchema:

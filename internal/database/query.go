@@ -3,8 +3,10 @@ package database
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"time"
 	"unicode/utf8"
 
@@ -226,9 +228,34 @@ func normalize(v any) any {
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64:
 		return value
+	case fmt.Stringer:
+		// UUIDs, big numbers and decimals print their canonical form.
+		return value.String()
 	default:
-		return cast.ToString(value)
+		return normalizeComposite(value)
 	}
+}
+
+// normalizeComposite renders lists, sets, maps and structs, which non-SQL
+// drivers return as Go values, as JSON text instead of letting them collapse
+// into an empty string.
+func normalizeComposite(v any) any {
+	rv := reflect.ValueOf(v)
+
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return nil
+		}
+
+		return normalize(rv.Elem().Interface())
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Struct:
+		if b, err := json.Marshal(v); err == nil {
+			return string(b)
+		}
+	}
+
+	return cast.ToString(v)
 }
 
 // Print renders a Result as an ASCII table, the REPL output format.

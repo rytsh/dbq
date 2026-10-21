@@ -58,6 +58,22 @@ connections:
     source: "./scratch.db"
     permission: full
 
+  events:
+    type: cassandra
+    source: "cassandra://dbq_ro:pass@cass1.internal:9042,cass2.internal/app?consistency=local_quorum&dc=eu1"
+    description: "event store, query by partition key"
+    permission: read-only
+
+  docs:
+    type: mongodb
+    source: "mongodb://dbq_ro:pass@mongo.internal:27017/app?readPreference=secondary"
+    permission: read-only
+
+  cache:
+    type: redis
+    source: "redis://dbq:pass@redis.internal:6379/0"
+    permission: safe-write
+
 # Connection pool defaults. Zero inherits, a negative value means unlimited.
 # Each connection may override any field under its own pool block; a negative
 # max_idle follows max_open.

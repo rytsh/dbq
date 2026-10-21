@@ -54,3 +54,26 @@ func TestSplitComplete(t *testing.T) {
 		t.Errorf("SplitComplete = %q, %q", complete, rest)
 	}
 }
+
+func TestSplitterFor(t *testing.T) {
+	tests := []struct {
+		language string
+		in       string
+		want     []string
+		rest     string
+	}{
+		{LanguageRedis, "GET a\n\nSET b \"x;y\"\nINCR", []string{"GET a", `SET b "x;y"`}, "INCR"},
+		{LanguageMongoDB, "{\"find\": \"u\",\n \"filter\": {\"a\": \"}\"}};\n{\"count\": \"u\"} {\"ping\"", []string{"{\"find\": \"u\",\n \"filter\": {\"a\": \"}\"}}", `{"count": "u"}`}, `{"ping"`},
+		{LanguageMongoDB, "db.users.find()\n{\"ping\": 1}", []string{"db.users.find()", `{"ping": 1}`}, ""},
+		{LanguageCQL, "SELECT * FROM t; BEGIN BATCH INSERT INTO t (a) VALUES (1); DELETE FROM t WHERE a = 2; APPLY BATCH; SELECT 1",
+			[]string{"SELECT * FROM t;", "BEGIN BATCH INSERT INTO t (a) VALUES (1); DELETE FROM t WHERE a = 2; APPLY BATCH;"}, " SELECT 1"},
+		{LanguageCQL, "BEGIN BATCH INSERT INTO t (a) VALUES (1);", nil, "BEGIN BATCH INSERT INTO t (a) VALUES (1);"},
+	}
+
+	for _, tt := range tests {
+		got, rest := SplitterFor(tt.language)(tt.in)
+		if strings.Join(got, "|") != strings.Join(tt.want, "|") || rest != tt.rest {
+			t.Errorf("%s split(%q) = %q, %q; want %q, %q", tt.language, tt.in, got, rest, tt.want, tt.rest)
+		}
+	}
+}

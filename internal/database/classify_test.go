@@ -2,6 +2,19 @@ package database
 
 import "testing"
 
+func TestExternalFunctionNamesAsColumns(t *testing.T) {
+	// Only a call is external; the same words as column names stay reads.
+	for _, sql := range []string{
+		"SELECT url, file FROM links",
+		"SELECT * FROM t WHERE query = 'x'",
+		"SELECT 'read_csv(' FROM t",
+	} {
+		if got := Classify(sql); got != KindRead {
+			t.Errorf("Classify(%q) = %q, want read", sql, got)
+		}
+	}
+}
+
 // TestBypasses locks in the statements that a naive leading-verb classifier
 // reports as reads. Every one of these would otherwise run on a connection
 // configured as read-only.
@@ -46,6 +59,18 @@ func TestBypasses(t *testing.T) {
 		{"pragma unknown", "PRAGMA something_new", KindSchema},
 		{"pragma read setting", "PRAGMA journal_mode", KindRead},
 		{"pragma read query", "PRAGMA main.table_info(users)", KindRead},
+
+		// ClickHouse and DuckDB table functions reach files, URLs and other
+		// servers from inside a SELECT.
+		{"clickhouse file", "SELECT * FROM file('/etc/passwd', 'LineAsString')", KindSchema},
+		{"clickhouse url", "SELECT * FROM url('http://169.254.169.254/', 'RawBLOB')", KindSchema},
+		{"clickhouse remote in subquery", "SELECT * FROM t WHERE id IN (SELECT id FROM remote('h', db.t))", KindSchema},
+		{"clickhouse executable", "SELECT * FROM executable('x.sh', 'TSV', 'a String')", KindSchema},
+		{"clickhouse insert into function", "INSERT INTO FUNCTION file('out.csv') VALUES (1)", KindSchema},
+		{"duckdb read_csv", "SELECT * FROM read_csv('/etc/passwd')", KindSchema},
+		{"duckdb quoted function", `SELECT * FROM "read_parquet"('x.parquet')`, KindSchema},
+		{"duckdb file shorthand", "SELECT * FROM '/etc/passwd'", KindSchema},
+		{"duckdb getenv", "SELECT getenv('AWS_SECRET_ACCESS_KEY')", KindSchema},
 	}
 
 	for _, tt := range tests {

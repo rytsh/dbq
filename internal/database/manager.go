@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
-
-	"github.com/jmoiron/sqlx"
 )
 
 // ErrUnknownConnection is returned when a named connection is not configured.
@@ -29,8 +27,11 @@ type ConnectionDef struct {
 // ConnectionInfo is the redacted view of a connection, safe to return over the
 // API or to an MCP client. It never carries the DSN.
 type ConnectionInfo struct {
-	Name        string     `json:"name"`
-	Type        string     `json:"type"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	// Language is the query language statements must be written in:
+	// sql, cql, mongodb or redis.
+	Language    string     `json:"language"`
 	Dialect     string     `json:"dialect,omitempty"`
 	Description string     `json:"description,omitempty"`
 	Permission  Permission `json:"permission"`
@@ -39,8 +40,8 @@ type ConnectionInfo struct {
 type connEntry struct {
 	def ConnectionDef
 
-	mu sync.Mutex
-	db *sqlx.DB
+	mu      sync.Mutex
+	backend Backend
 }
 
 // CatalogType returns the database dialect used for schema introspection.
@@ -121,6 +122,7 @@ func (m *Manager) List() []ConnectionInfo {
 		out = append(out, ConnectionInfo{
 			Name:        def.Name,
 			Type:        def.Type,
+			Language:    LanguageOf(def.Type),
 			Dialect:     def.Dialect,
 			Description: def.Description,
 			Permission:  def.Permission,
@@ -153,8 +155,8 @@ func (m *Manager) entry(name string) (*connEntry, error) {
 	return entry, nil
 }
 
-// DB returns the pool for name, opening it on first use.
-func (m *Manager) DB(ctx context.Context, name string) (*sqlx.DB, error) {
+// Backend returns the open backend for name, connecting on first use.
+func (m *Manager) Backend(ctx context.Context, name string) (Backend, error) {
 	entry, err := m.entry(name)
 	if err != nil {
 		return nil, err
@@ -166,30 +168,30 @@ func (m *Manager) DB(ctx context.Context, name string) (*sqlx.DB, error) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if entry.db != nil {
-		return entry.db, nil
+	if entry.backend != nil {
+		return entry.backend, nil
 	}
 
-	db, err := ConnectDB(ctx, entry.def.Type, entry.def.Source, entry.def.Pool)
+	backend, err := openBackend(ctx, entry.def)
 	if err != nil {
 		return nil, fmt.Errorf("connection %q: %w", entry.def.Name, err)
 	}
 
 	slog.Info("connected to database", "connection", entry.def.Name, "type", entry.def.Type)
 
-	entry.db = db
+	entry.backend = backend
 
-	return db, nil
+	return backend, nil
 }
 
 // Ping opens (if needed) and verifies the connection.
 func (m *Manager) Ping(ctx context.Context, name string) error {
-	db, err := m.DB(ctx, name)
+	backend, err := m.Backend(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	return db.PingContext(ctx)
+	return backend.Ping(ctx)
 }
 
 // Close shuts every open pool down. Errors are joined so one bad pool does not
@@ -201,12 +203,12 @@ func (m *Manager) Close() error {
 		entry := m.entries[name]
 
 		entry.mu.Lock()
-		if entry.db != nil {
-			if err := entry.db.Close(); err != nil {
+		if entry.backend != nil {
+			if err := entry.backend.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("closing %q: %w", name, err))
 			}
 
-			entry.db = nil
+			entry.backend = nil
 		}
 		entry.mu.Unlock()
 	}

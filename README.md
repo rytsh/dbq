@@ -5,17 +5,65 @@
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/rytsh/dbq/test.yml?branch=main&logo=github&style=flat-square&label=ci)](https://github.com/rytsh/dbq/actions)
 [![Go PKG](https://raw.githubusercontent.com/rakunlabs/.github/main/assets/badges/gopkg.svg)](https://pkg.go.dev/github.com/rytsh/dbq)
 
-Run SQL against databases from the terminal or from an AI agent.
+Query SQL databases, Cassandra, MongoDB and Redis from the terminal or from an
+AI agent.
 
 `dbq` is three things over one core:
 
-- an interactive REPL that executes raw SQL and prints a table;
+- an interactive REPL that runs raw statements and prints a table;
 - an HTTP server with health and liveness probes;
 - an **MCP server** so agents like Claude Code, Cursor or Windsurf can inspect
   schemas and query your databases.
 
-Supported drivers: `pgx` (PostgreSQL), `sqlite3`, `sqlserver`, `godror` (Oracle),
-`odbc`.
+Releases ship two binaries:
+
+- `dbq` is pure Go (no cgo) and runs anywhere.
+- `dbq-cgo` adds `odbc` and `duckdb`. It is built with cgo and needs unixODBC
+  (`libodbc`) at runtime. The Docker image uses this build.
+
+| Type         | Database                                   | Example source | Binary |
+| ------------ | ------------------------------------------ | -------------- | ------ |
+| `pgx`        | PostgreSQL and compatibles (CockroachDB, YugabyteDB, TimescaleDB, Neon, Supabase, Redshift) | `postgres://user:pass@host:5432/app` | both |
+| `mysql`      | MySQL and compatibles (MariaDB, TiDB, PlanetScale, Vitess, SingleStore, Doris, StarRocks) | `user:pass@tcp(host:3306)/app?parseTime=true` | both |
+| `sqlserver`  | SQL Server, Azure SQL                      | `sqlserver://user:pass@host:1433?database=app` | both |
+| `oracle`     | Oracle ([go-ora](https://github.com/sijms/go-ora), no Instant Client needed) | `oracle://user:pass@host:1521/service` | both |
+| `sqlite3`    | SQLite                                     | `file:./app.db?mode=ro` | both |
+| `clickhouse` | ClickHouse                                 | `clickhouse://user:pass@host:9000/app` | both |
+| `trino`      | Trino, Presto                              | `http://user@host:8080?catalog=hive&schema=default` | both |
+| `duckdb`     | DuckDB (runs inside the dbq process)       | `./analytics.duckdb?access_mode=read_only` | `dbq-cgo` |
+| `odbc`       | Anything with an ODBC driver (Ingres, DB2, Informix, ...); set `dialect` for catalog queries | `DSN=bas` | `dbq-cgo` |
+| `cassandra`  | Cassandra, ScyllaDB, Astra (CQL)           | `cassandra://user:pass@host1:9042,host2/keyspace?consistency=local_quorum` | both |
+| `mongodb`    | MongoDB, DocumentDB, Cosmos DB for MongoDB | `mongodb://user:pass@host:27017/app` | both |
+| `redis`      | Redis, Valkey, KeyDB, Dragonfly            | `redis://:pass@host:6379/0` (`rediss://` for TLS) | both |
+
+### Non-SQL databases
+
+Each connection has a **language**, shown by `dbq_list_connections`, and every
+statement is written and permission-checked in that language:
+
+| Language  | A statement is                                  | Example |
+| --------- | ----------------------------------------------- | ------- |
+| `cql`     | one CQL statement; `BEGIN BATCH ... APPLY BATCH` counts as one | `SELECT * FROM ks.users WHERE org = 'acme'` |
+| `mongodb` | one database command as Extended JSON, as `db.runCommand()` takes it | `{"find": "users", "filter": {"age": {"$gt": 30}}, "limit": 10}` |
+| `redis`   | one command in redis-cli syntax                | `HGETALL user:1` |
+
+In the REPL a Redis command ends at the newline and a MongoDB command at its
+closing brace; CQL ends at `;` like SQL.
+
+Results are always a table. A MongoDB document becomes a row with one column per
+top-level field (nested values as JSON); a Redis hash becomes `field`/`value`
+rows and a list one row per element. `dbq_list_tables` and
+`dbq_describe_table` map onto keyspaces and tables (Cassandra), collections with
+fields inferred from a 100-document sample (MongoDB), and keys found by `SCAN`
+with an optional `MATCH` pattern as the schema argument (Redis).
+`dbq_export` is SQL-only.
+
+Cassandra source options: `consistency`, `dc` (local datacenter),
+`timeout`, `connect_timeout`, `tls=true`, `proto_version`.
+
+In a read query, ClickHouse and DuckDB functions that read files, URLs, the
+environment or other servers (`file()`, `url()`, `s3()`, `remote()`,
+`read_csv()`, `FROM 'file.csv'`, `getenv()`, ...) require `full` permission.
 
 ## Run with Docker
 
@@ -204,6 +252,20 @@ Some statements are refused at **every** level:
   and the other query-only pragmas remain reads; maintenance pragmas such as
   `PRAGMA wal_checkpoint` or `PRAGMA optimize` need `full`.
 
+### Non-SQL permissions
+
+The same three levels apply, with "bounded" meaning the write names the rows,
+documents or keys it touches:
+
+| | read-only | safe-write | full | refused |
+|---|---|---|---|---|
+| **CQL** | `SELECT`, `DESCRIBE`, `LIST` | `INSERT`; `UPDATE`/`DELETE` with a selective `WHERE`; batches of those | `UPDATE`/`DELETE` without one, DDL, `GRANT` | `USE`, more than one statement |
+| **MongoDB** | `find`, `aggregate`, `count`, `distinct`, `listCollections`, `explain` of a read, ... | `insert`; `update`/`delete`/`findAndModify` whose every filter selects specific documents | empty or match-all filters (`{}`, `$exists`, `$ne`, `$expr`, `$or` with `{}`, ranges from `$minKey`), upserts, pipeline updates, `$out`/`$merge`, `$where`/`$function`, DDL, user and server commands | transactions and session commands |
+| **Redis** | `GET`, `HGETALL`, `SCAN`, `ZRANGE`, `INFO`, `CONFIG GET`, ... | commands that write the keys they name (`SET`, `HSET`, `DEL`, `LPUSH`, `EXPIRE`, ...) | `FLUSHDB`, `FLUSHALL`, `KEYS`, `EVAL`/`FCALL`, `CONFIG SET`, `ACL`, module DDL, unknown commands | `SELECT`, `MULTI`/`EXEC`, `WATCH`, blocking pops, `SUBSCRIBE`, `MONITOR`, `CLIENT` |
+
+Classification is static and allow-listed: a command dbq does not know needs
+`full`, and nothing the server reports can widen what dbq lets through.
+
 ### How the classifier reads SQL
 
 It is a lexer, not a parser, but it takes the adversarial cases seriously. It
@@ -314,7 +376,13 @@ tables dbq should see.
 | `pgx`       | `postgres://dbq_ro@host/app?default_transaction_read_only=on` | Can be turned off with `SELECT set_config(...)`, so use it together with a read-only user. |
 | `sqlite3`   | `file:./app.db?mode=ro`                                 | SQLite has no users. `mode=ro` opens the file read-only. Also make the file read-only for the dbq process's OS user. |
 | `sqlserver` | none                                                    | `ApplicationIntent=ReadOnly` only routes to an Always On secondary. It does not block writes. |
-| `godror`    | none                                                    | Use a read-only user. |
+| `oracle`    | none                                                    | Use a read-only user. |
+| `mysql`     | none                                                    | Use a user with only `SELECT`. |
+| `clickhouse`| none                                                    | Use a user whose settings profile sets `readonly = 1`; a session cannot turn that off. |
+| `duckdb`    | `./app.duckdb?access_mode=read_only`                    | DuckDB runs inside dbq with the dbq process's file access. |
+| `cassandra` | none                                                    | Use a role with only `SELECT` on the keyspace: `GRANT SELECT ON KEYSPACE app TO dbq_ro`. |
+| `mongodb`   | `readPreference=secondary`                              | Routes reads to a secondary but does not block writes; use a user with the `read` role. |
+| `redis`     | none                                                    | Use an ACL user limited to reads: `ACL SETUSER dbq_ro on >pass ~* &* -@all +@read +ping +info`. |
 
 A `read-only` connection whose user can write still works, but its safety then
 depends entirely on the classifier.
@@ -439,12 +507,12 @@ For a remote or long-running service, use Streamable HTTP:
 
 | Tool                    | Description                                                            |
 | ----------------------- | ---------------------------------------------------------------------- |
-| `dbq_list_connections`  | List reachable databases with their driver type and permission level   |
+| `dbq_list_connections`  | List reachable databases with their driver type, language and permission level |
 | `dbq_list_tables`       | List tables and views, optionally within one schema                    |
 | `dbq_describe_table`    | Columns of one table: type, nullability, default, primary key          |
 | `dbq_schema_context`    | Compact one-line-per-table schema summary, cheap in tokens             |
 | `dbq_query`             | Run one read-only statement; writes are always refused here            |
-| `dbq_export`            | Export a SELECT to a downloadable batched-INSERT `.sql` artifact        |
+| `dbq_export`            | Export a SELECT to a downloadable batched-INSERT `.sql` artifact (SQL connections only) |
 | `dbq_execute`           | Run one modifying statement, subject to the permission level           |
 
 `dbq_execute` is **not advertised** on an endpoint where it could never succeed
@@ -528,8 +596,10 @@ docker run -d --name dbq --restart unless-stopped -p 8080:8080 \
 
 ## Building
 
-The `odbc`, `godror` and `sqlite3` drivers are cgo, so `CGO_ENABLED=1` and the
-unixODBC headers are required:
+`make build` produces the pure Go binary, no cgo or system libraries needed.
+
+The `odbc` and `duckdb` drivers sit behind build tags of the same name and
+need cgo; `odbc` also needs the unixODBC headers:
 
 ```sh
 # macOS
@@ -539,7 +609,8 @@ export CGO_CFLAGS="-I/opt/homebrew/include" CGO_LDFLAGS="-L/opt/homebrew/lib"
 # Debian/Ubuntu
 sudo apt-get install -y unixodbc-dev
 
-make build
-make test
-make lint   # golangci-lint, configured in .golangci.yml; CI fails on findings
+make build        # bin/dbq, CGO_ENABLED=0
+make build-cgo    # bin/dbq-cgo, CGO_ENABLED=1 -tags odbc,duckdb
+make test         # runs with the odbc and duckdb tags
+make lint         # golangci-lint, configured in .golangci.yml; CI fails on findings
 ```
